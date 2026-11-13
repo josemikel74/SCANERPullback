@@ -1,0 +1,8 @@
+{
+  "name": "Monitor Pullback SMA — IBEX 35, DAX y S&P 500",
+  "description": "Sistema profesional de monitorización bursátil para detectar pullbacks a las medias móviles simples SMA 50 y SMA 200 en los índices IBEX 35, DAX 40 y S&P 500.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
