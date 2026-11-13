@@ -31,6 +31,14 @@ Sistema profesional de monitorización bursátil en tiempo real construido con *
 ## Arquitectura del Repositorio
 
 ```text
+├── app.py                               # Aplicación Streamlit lista para Streamlit Community Cloud
+├── requirements.txt                     # Dependencias Python (streamlit, pandas, requests)
+├── .streamlit/
+│   └── config.toml                      # Configuración y tema corporativo claro de Streamlit
+├── streamlit_core/
+│   ├── tickers_data.py                  # Listados maestros Python (IBEX 35, DAX 40, S&P 500)
+│   ├── yahoo_service.py                 # Conector Python Yahoo Finance v8 con lotes y agregación 4h
+│   └── indicators.py                    # Motor matemático Python SMA 50/200 y estrategias Modo A/B
 ├── index.html                           # Metadatos SEO y tipografía tabular (Plus Jakarta Sans / JetBrains Mono)
 ├── package.json                         # Dependencias estándar (react, react-dom, lucide-react, tailwindcss)
 ├── tsconfig.json                        # Configuración TypeScript estricta (strict + noUnusedLocals)
@@ -60,7 +68,25 @@ Sistema profesional de monitorización bursátil en tiempo real construido con *
 
 ---
 
-## Instalación y Desarrollo Local
+## Ejecución en Streamlit (Local y Streamlit Community Cloud)
+
+Requisitos previos: **Python 3.10+**.
+
+```bash
+# 1. Instalar dependencias de Python
+pip install -r requirements.txt
+
+# 2. Ejecutar la aplicación Streamlit
+streamlit run app.py
+```
+
+Para desplegar en **Streamlit Community Cloud**:
+1. Sube este repositorio a GitHub.
+2. En [share.streamlit.io](https://share.streamlit.io/), selecciona el repositorio, la rama principal y especifica `app.py` como archivo de entrada (*Main file path*).
+
+---
+
+## Ejecución Frontend Estático (Vite + React + TypeScript)
 
 Requisitos previos: **Node.js 20+** y **npm 10+**.
 
