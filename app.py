@@ -1,27 +1,39 @@
 from __future__ import annotations
 
+import json
+import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
+try:
+    import plotly.graph_objects as go  # type: ignore
+except ImportError:
+    go = None
+
 from streamlit_core.indicators import (
     SMA_LONG_PERIOD,
     SMA_SHORT_PERIOD,
+    calculate_sma_series,
     evaluate_pullback_signals,
     sanitize_candles,
 )
 from streamlit_core.tickers_data import (
     DAX_40_TICKERS,
+    EUROPE_TICKERS,
     IBEX_35_TICKERS,
     MARKETS_METADATA,
     SP500_TICKERS,
     get_tickers_by_market,
+    infer_currency_symbol,
 )
 from streamlit_core.yahoo_service import fetch_market_batch
 
 CACHE_TTL_SECONDS = 300  # 5 minutos
+DEFAULT_WATCHLIST = ["ITX.MC", "SAN.MC", "IBE.MC", "SAP.DE", "SIE.DE", "AAPL", "MSFT", "NVDA"]
 
 st.set_page_config(
     page_title="Monitor Pullback SMA — IBEX 35, DAX 40 y S&P 500",
@@ -58,6 +70,42 @@ st.markdown(
 )
 
 
+def normalize_watchlist_tokens(raw_tokens: List[str]) -> List[str]:
+    seen = set()
+    clean: List[str] = []
+    for raw in raw_tokens:
+        t = raw.strip().upper().strip('"')
+        if not t:
+            continue
+        if t.startswith("BME:"):
+            t = f"{t[4:]}.MC"
+        elif t.startswith("XETR:"):
+            t = f"{t[5:]}.DE"
+        elif ":" in t:
+            t = t.split(":", 1)[1].strip()
+        if re.match(r"^[A-Z0-9.-]{1,16}$", t) and t not in seen:
+            seen.add(t)
+            clean.append(t)
+    return clean
+
+
+def parse_watchlist_text(raw_text: str) -> List[str]:
+    trimmed = raw_text.strip()
+    if not trimmed:
+        return []
+    if trimmed.startswith("[") or trimmed.startswith("{"):
+        try:
+            data = json.loads(trimmed)
+            if isinstance(data, list):
+                return normalize_watchlist_tokens([str(x) for x in data])
+            if isinstance(data, dict) and isinstance(data.get("tickers"), list):
+                return normalize_watchlist_tokens([str(x) for x in data["tickers"]])
+        except Exception:
+            pass
+    tokens = re.split(r"[\s,;]+", trimmed)
+    return normalize_watchlist_tokens(tokens)
+
+
 def format_tradingview_symbol(ticker: str) -> str:
     if ticker.endswith(".MC"):
         return f"BME:{ticker[:-3]}"
@@ -89,6 +137,8 @@ def init_session_state() -> None:
         st.session_state.stop_requested = False
     if "last_scan_status" not in st.session_state:
         st.session_state.last_scan_status = "IDLE"
+    if "watchlist_tickers" not in st.session_state:
+        st.session_state.watchlist_tickers = list(DEFAULT_WATCHLIST)
 
 
 def get_valid_cache_entry(market_id: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -129,7 +179,7 @@ def evaluate_cached_market(
 ) -> tuple[List[Dict[str, Any]], float]:
     t0 = time.perf_counter()
     rows: List[Dict[str, Any]] = []
-    symbol = str(MARKETS_METADATA[market_id]["currencySymbol"])
+    fallback_symbol = str(MARKETS_METADATA[market_id]["currencySymbol"])
 
     for res in responses:
         ticker = res["ticker"]
@@ -157,6 +207,7 @@ def evaluate_cached_market(
         recent_vols = [c.volume for c in valid_candles[-21:-1] if c.volume > 0]
         avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
         vol_ratio = (last_c.volume / avg_vol) if (avg_vol > 0 and last_c.volume > 0) else 1.0
+        symbol = infer_currency_symbol(ticker, fallback_symbol)
 
         rows.append(
             {
@@ -180,6 +231,13 @@ def evaluate_cached_market(
                 "bounce_200": eval_out.bounce_match_200,
                 "diag_50": eval_out.diagnostics_50,
                 "diag_200": eval_out.diagnostics_200,
+                "rsi_14": eval_out.rsi_14,
+                "atr_14": eval_out.atr_14,
+                "atr_dist_50": eval_out.atr_distance_50,
+                "atr_dist_200": eval_out.atr_distance_200,
+                "is_golden_cross": eval_out.is_golden_cross,
+                "backtest": eval_out.backtest,
+                "candles": valid_candles,
                 "volume_ratio": vol_ratio,
                 "valid_candles": eval_out.valid_candles_count,
                 "raw_candles": len(res["candles"]),
@@ -188,6 +246,18 @@ def evaluate_cached_market(
 
     elapsed_ms = max(0.1, round((time.perf_counter() - t0) * 1000.0, 2))
     return rows, elapsed_ms
+
+
+def get_min_atr_dist(row: Dict[str, Any], sma_filter_label: str) -> Optional[float]:
+    d50 = row["atr_dist_50"]
+    d200 = row["atr_dist_200"]
+    if sma_filter_label == "SMA 50":
+        return d50
+    if sma_filter_label == "SMA 200":
+        return d200
+    if d50 is not None and d200 is not None:
+        return d50 if abs(d50) <= abs(d200) else d200
+    return d50 if d50 is not None else d200
 
 
 def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: str) -> bytes:
@@ -208,6 +278,9 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
         "Dist. SMA 50 %",
         "SMA 200",
         "Dist. SMA 200 %",
+        "RSI 14",
+        "ATR 14",
+        "Golden Cross",
         "Volumen Relativo",
         "Velas Validas",
         "Media Objetivo",
@@ -228,6 +301,9 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
                     fmt_es(r["dist_50"]),
                     fmt_es(r["sma_200"]),
                     fmt_es(r["dist_200"]),
+                    fmt_es(r["rsi_14"]),
+                    fmt_es(r["atr_14"]),
+                    "SI" if r["is_golden_cross"] else "NO",
                     fmt_es(r["volume_ratio"]),
                     str(r["valid_candles"]),
                     r["media_badge"],
@@ -238,13 +314,84 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
     return content.encode("utf-8")
 
 
+def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
+    candles = target["candles"]
+    if len(candles) < 2:
+        st.caption("No hay suficientes velas válidas para el gráfico.")
+        return
+
+    closes = [c.close for c in candles]
+    sma50_all = calculate_sma_series(closes, SMA_SHORT_PERIOD)
+    sma200_all = calculate_sma_series(closes, SMA_LONG_PERIOD)
+
+    tail = min(100, len(candles))
+    sl_candles = candles[-tail:]
+    sl_sma50 = sma50_all[-tail:]
+    sl_sma200 = sma200_all[-tail:]
+    dates = [
+        datetime.fromtimestamp(c.timestamp / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        for c in sl_candles
+    ]
+
+    if go is not None:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Candlestick(
+                x=dates,
+                open=[c.open for c in sl_candles],
+                high=[c.high for c in sl_candles],
+                low=[c.low for c in sl_candles],
+                close=[c.close for c in sl_candles],
+                name=target["ticker"],
+                increasing_line_color="#10B981",
+                decreasing_line_color="#EF4444",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=sl_sma50,
+                mode="lines",
+                name="SMA 50",
+                line=dict(color="#1D4ED8", width=1.8),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=sl_sma200,
+                mode="lines",
+                name="SMA 200",
+                line=dict(color="#4338CA", width=1.8),
+            )
+        )
+        fig.update_layout(
+            height=380,
+            margin=dict(l=10, r=10, t=24, b=10),
+            xaxis_rangeslider_visible=False,
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        chart_df = pd.DataFrame(
+            {
+                "Fecha": dates,
+                "Cierre": [c.close for c in sl_candles],
+                "SMA 50": sl_sma50,
+                "SMA 200": sl_sma200,
+            }
+        ).set_index("Fecha")
+        st.line_chart(chart_df)
+
+
 def main() -> None:
     init_session_state()
 
     st.title("Monitor Pullback SMA — IBEX 35, DAX 40 y S&P 500")
     st.caption(
         "Sistema profesional en tiempo real para detectar pullbacks a SMA 50 y SMA 200 · "
-        "Datos Yahoo Finance · Caché en memoria (TTL 5 min)"
+        "RSI(14), ATR(14), Golden Cross, Backtest rápido y Watchlist"
     )
 
     tab_scanner, tab_universe, tab_methodology = st.tabs(
@@ -252,15 +399,16 @@ def main() -> None:
     )
 
     with tab_scanner:
-        # Barra de controles superior
-        col_m, col_tf, col_strat, col_sma = st.columns([1.4, 1.0, 1.8, 1.1])
+        col_m, col_tf, col_strat, col_sma = st.columns([1.5, 1.0, 1.8, 1.1])
 
         with col_m:
-            market_options = ["IBEX35", "DAX", "SP500"]
+            market_options = ["IBEX35", "DAX", "SP500", "EUROPE", "WATCHLIST"]
             market_labels = {
                 "IBEX35": f"IBEX 35 ({len(IBEX_35_TICKERS)})",
                 "DAX": f"DAX 40 ({len(DAX_40_TICKERS)})",
                 "SP500": f"S&P 500 ({len(SP500_TICKERS)})",
+                "EUROPE": f"Europa ({len(EUROPE_TICKERS)})",
+                "WATCHLIST": f"★ Watchlist ({len(st.session_state.watchlist_tickers)})",
             }
             market_id = st.selectbox(
                 "Mercado / Índice",
@@ -293,7 +441,47 @@ def main() -> None:
                 key="selected_sma_filter",
             )
 
-        # Segunda fila de controles: umbral ±%, búsqueda, sector, botones Iniciar / Detener
+        # Gestor de Watchlist cuando está seleccionada
+        if market_id == "WATCHLIST":
+            with st.expander("Gestionar Watchlist Personalizada (Editar / Importar / Exportar JSON)", expanded=True):
+                wl_col1, wl_col2 = st.columns([2, 1])
+                with wl_col1:
+                    wl_text = st.text_input(
+                        "Tickers (separados por comas o espacios; soporta BME:ITX, XETR:SAP, AAPL)",
+                        value=", ".join(st.session_state.watchlist_tickers),
+                        key="wl_editor_text",
+                    )
+                    if st.button("Aplicar lista Watchlist"):
+                        st.session_state.watchlist_tickers = parse_watchlist_text(wl_text)
+                        for k in list(st.session_state.market_cache.keys()):
+                            if k.startswith("WATCHLIST_"):
+                                del st.session_state.market_cache[k]
+                        st.rerun()
+                with wl_col2:
+                    uploaded = st.file_uploader(
+                        "Importar JSON / TXT",
+                        type=["json", "txt", "csv"],
+                        key="wl_file_upload",
+                    )
+                    if uploaded is not None:
+                        imported = parse_watchlist_text(uploaded.read().decode("utf-8", errors="ignore"))
+                        if imported:
+                            st.session_state.watchlist_tickers = imported
+                            for k in list(st.session_state.market_cache.keys()):
+                                if k.startswith("WATCHLIST_"):
+                                    del st.session_state.market_cache[k]
+                    st.download_button(
+                        "Exportar Watchlist JSON",
+                        data=json.dumps(
+                            {"name": "PullbackMonitor Watchlist", "tickers": st.session_state.watchlist_tickers},
+                            indent=2,
+                        ).encode("utf-8"),
+                        file_name="watchlist_pullbacks.json",
+                        mime="application/json",
+                        use_container_width=True,
+                    )
+
+        # Segunda fila de controles
         c_thresh, c_search, c_sector, c_all, c_btn_start, c_btn_stop = st.columns(
             [1.0, 1.4, 1.2, 1.1, 1.0, 0.8]
         )
@@ -309,7 +497,7 @@ def main() -> None:
                 key="proximity_threshold",
             )
 
-        universe = get_tickers_by_market(market_id)
+        universe = get_tickers_by_market(market_id, st.session_state.watchlist_tickers)
         ticker_info_map = {t["ticker"]: t for t in universe}
         sectors = sorted({t["sector"] for t in universe})
 
@@ -333,17 +521,50 @@ def main() -> None:
 
         with c_btn_start:
             st.write("")
-            start_clicked = st.button("Iniciar Escaneo", type="primary", use_container_width=True)
+            start_clicked = st.button(
+                "Iniciar Escaneo",
+                type="primary",
+                disabled=len(universe) == 0,
+                use_container_width=True,
+            )
 
         with c_btn_stop:
             st.write("")
             stop_clicked = st.button("Detener", use_container_width=True)
 
+        # Tercera fila: Filtros Técnicos Avanzados
+        f_gc, f_vol, f_rsi, f_atr = st.columns([1.2, 1.2, 1.3, 1.2])
+        with f_gc:
+            st.write("")
+            only_golden_cross = st.checkbox("Golden Cross (SMA 50 > 200)", value=False, key="only_gc")
+        with f_vol:
+            min_vol_label = st.selectbox(
+                "Volumen Rel. Mínimo",
+                options=["Cualquiera", "≥ 1,2x", "≥ 1,5x", "≥ 2,0x"],
+                key="min_vol_filter",
+            )
+            min_vol_map = {"Cualquiera": 0.0, "≥ 1,2x": 1.2, "≥ 1,5x": 1.5, "≥ 2,0x": 2.0}
+            min_vol_val = min_vol_map[min_vol_label]
+        with f_rsi:
+            rsi_filter_label = st.selectbox(
+                "Filtro RSI (14)",
+                options=["Todos", "RSI < 55 (No sobrecompra)", "RSI 35-55 (Zona pullback)"],
+                key="rsi_filter",
+            )
+        with f_atr:
+            atr_filter_label = st.selectbox(
+                "Distancia Máx. ATR",
+                options=["Todas", "≤ 0,5 ATR", "≤ 1,0 ATR", "≤ 1,5 ATR"],
+                key="atr_filter",
+            )
+            atr_filter_map = {"Todas": 0.0, "≤ 0,5 ATR": 0.5, "≤ 1,0 ATR": 1.0, "≤ 1,5 ATR": 1.5}
+            max_atr_val = atr_filter_map[atr_filter_label]
+
         if stop_clicked:
             st.session_state.stop_requested = True
             st.session_state.last_scan_status = "STOPPED"
 
-        if start_clicked:
+        if start_clicked and universe:
             st.session_state.stop_requested = False
             st.session_state.last_scan_status = "SCANNING"
             progress_bar = st.progress(0, text=f"Analizando 0 de {len(universe)} acciones...")
@@ -390,7 +611,6 @@ def main() -> None:
                 float(proximity_threshold),
             )
 
-            # Cálculo de KPIs globales
             total_analyzed = len(all_rows)
             sma_50_hits = 0
             sma_200_hits = 0
@@ -417,7 +637,6 @@ def main() -> None:
             k3.metric("En SMA 50", str(sma_50_hits))
             k4.metric("En SMA 200", str(sma_200_hits))
 
-            # Filtrado y enriquecimiento de filas
             q = search_query.strip().lower()
             filtered_rows: List[Dict[str, Any]] = []
 
@@ -426,6 +645,21 @@ def main() -> None:
                     continue
                 if q and q not in r["ticker"].lower() and q not in r["name"].lower():
                     continue
+                if only_golden_cross and not r["is_golden_cross"]:
+                    continue
+                if min_vol_val > 0 and r["volume_ratio"] < min_vol_val:
+                    continue
+                if rsi_filter_label.startswith("RSI < 55"):
+                    if r["rsi_14"] is None or r["rsi_14"] >= 55:
+                        continue
+                elif rsi_filter_label.startswith("RSI 35-55"):
+                    if r["rsi_14"] is None or r["rsi_14"] < 35 or r["rsi_14"] > 55:
+                        continue
+
+                atr_dist = get_min_atr_dist(r, sma_filter_label)
+                if max_atr_val > 0:
+                    if atr_dist is None or abs(atr_dist) > max_atr_val:
+                        continue
 
                 m50 = r["prox_50"] if is_proximity_mode else r["bounce_50"]
                 m200 = r["prox_200"] if is_proximity_mode else r["bounce_200"]
@@ -459,9 +693,9 @@ def main() -> None:
                 enriched = dict(r)
                 enriched["media_badge"] = media_badge
                 enriched["min_dist"] = min_dist
+                enriched["display_atr_dist"] = atr_dist
                 filtered_rows.append(enriched)
 
-            # Orden por defecto: menor distancia absoluta a la SMA
             filtered_rows.sort(key=lambda item: item["min_dist"])
 
             st.caption(
@@ -472,8 +706,8 @@ def main() -> None:
 
             if not filtered_rows:
                 st.warning(
-                    "Ningún valor coincide con los filtros actuales. Prueba ampliando el rango ±% "
-                    "o activando «Mostrar todo el índice»."
+                    "Ningún valor coincide con los filtros actuales. Prueba ampliando el rango ±%, "
+                    "relajando RSI/Volumen/ATR o activando «Mostrar todo el índice»."
                 )
             else:
                 df_display = pd.DataFrame(
@@ -495,6 +729,10 @@ def main() -> None:
                                 f"{r['dist_200']:+.2f}%" if r["dist_200"] is not None else "—"
                             ),
                             "Banda 200": build_centered_microbar(r["dist_200"], float(proximity_threshold)),
+                            "RSI 14": r["rsi_14"],
+                            "Dist. ATR": (
+                                f"{r['display_atr_dist']:+.2f}" if r["display_atr_dist"] is not None else "—"
+                            ),
                             "Media Objetivo": r["media_badge"],
                             "Vol. Rel.": r["volume_ratio"],
                         }
@@ -529,6 +767,7 @@ def main() -> None:
                             "Var. %": "{:+.2f}%",
                             "SMA 50": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
                             "SMA 200": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
+                            "RSI 14": lambda x: f"{x:.1f}" if pd.notna(x) else "—",
                             "Vol. Rel.": "{:.2f}x",
                         }
                     )
@@ -565,35 +804,69 @@ def main() -> None:
                     with st.expander(f"Copiar Tickers para TradingView ({len(filtered_rows)})"):
                         st.code(tv_tickers, language=None)
 
-                # Auditoría matemática por valor seleccionado
-                with st.expander("Auditoría matemática detallada por valor"):
+                # Auditoría matemática, Gráfico OHLC interactivo y Backtest rápido por valor
+                with st.expander("Gráfico OHLC, Auditoría Matemática y Backtest Histórico", expanded=True):
                     selected_t = st.selectbox(
-                        "Selecciona un ticker para revisar fórmulas SMA 50 / SMA 200",
+                        "Selecciona un ticker para inspeccionar gráfico, fórmulas y backtest",
                         options=[r["ticker"] for r in filtered_rows],
                     )
                     target = next(r for r in filtered_rows if r["ticker"] == selected_t)
-                    st.write(
-                        f"**{target['ticker']} — {target['name']}** | Velas válidas: `{target['valid_candles']}` | "
-                        f"OHLC: O `{target['open']:.2f}` · H `{target['high']:.2f}` · L `{target['low']:.2f}` · C `{target['price']:.2f}`"
-                    )
+
+                    wl_action_col1, wl_action_col2 = st.columns([3, 1])
+                    with wl_action_col1:
+                        rsi_txt = f"{target['rsi_14']:.1f}" if target["rsi_14"] is not None else "—"
+                        atr_txt = f"{target['atr_14']:.2f}" if target["atr_14"] is not None else "—"
+                        gc_txt = "Sí (SMA 50 > 200)" if target["is_golden_cross"] else "No"
+                        st.write(
+                            f"**{target['ticker']} — {target['name']}** | Velas válidas: `{target['valid_candles']}` | "
+                            f"RSI(14): `{rsi_txt}` · ATR(14): `{atr_txt}` · Golden Cross: `{gc_txt}`"
+                        )
+                    with wl_action_col2:
+                        in_wl = target["ticker"] in st.session_state.watchlist_tickers
+                        if st.button(
+                            "★ Quitar de Watchlist" if in_wl else "☆ Añadir a Watchlist",
+                            key=f"wl_btn_{target['ticker']}",
+                            use_container_width=True,
+                        ):
+                            if in_wl:
+                                st.session_state.watchlist_tickers = [
+                                    t for t in st.session_state.watchlist_tickers if t != target["ticker"]
+                                ]
+                            else:
+                                st.session_state.watchlist_tickers = st.session_state.watchlist_tickers + [target["ticker"]]
+                            st.rerun()
+
+                    render_ohlc_chart(target, float(proximity_threshold))
+
                     d50, d200 = target["diag_50"], target["diag_200"]
+                    bt = target["backtest"]
                     col_d1, col_d2 = st.columns(2)
                     with col_d1:
-                        st.markdown("**Verificación SMA 50**")
+                        st.markdown("**Verificación SMA 50 & Backtest**")
                         if d50.sma_current is None:
                             st.caption("Velas insuficientes (< 50).")
                         else:
                             st.write(f"- SMA actual: `{d50.sma_current:.2f}` vs hace 10 velas: `{d50.sma_10_ago:.2f}` (Pendiente OK: `{d50.slope_positive_or_flat}`)")
-                            st.write(f"- Precio > SMA hace 5-15 velas: `{d50.was_above_in_5_to_15}`")
-                            st.write(f"- Toque (`Low <= SMA * 1.002`): `{d50.touched_recently}` | Rebote (`Close > SMA`): `{d50.closed_strictly_above}`")
+                            st.write(f"- Precio > SMA hace 5-15 velas: `{d50.was_above_in_5_to_15}` | Toque: `{d50.touched_recently}` | Rebote: `{d50.closed_strictly_above}`")
+                            if bt.sma_50.events_count > 0:
+                                st.write(
+                                    f"- **Backtest ({bt.sma_50.events_count} rebotes)**: "
+                                    f"+5v Acierto `{bt.sma_50.win_rate_5_pct:.0f}%` (Media `{bt.sma_50.avg_return_5_pct:+.2f}%`) · "
+                                    f"+10v Acierto `{bt.sma_50.win_rate_10_pct:.0f}%` (Media `{bt.sma_50.avg_return_10_pct:+.2f}%`)"
+                                )
                     with col_d2:
-                        st.markdown("**Verificación SMA 200**")
+                        st.markdown("**Verificación SMA 200 & Backtest**")
                         if d200.sma_current is None:
                             st.caption("Velas insuficientes (< 200).")
                         else:
                             st.write(f"- SMA actual: `{d200.sma_current:.2f}` vs hace 10 velas: `{d200.sma_10_ago:.2f}` (Pendiente OK: `{d200.slope_positive_or_flat}`)")
-                            st.write(f"- Precio > SMA hace 5-15 velas: `{d200.was_above_in_5_to_15}`")
-                            st.write(f"- Toque (`Low <= SMA * 1.002`): `{d200.touched_recently}` | Rebote (`Close > SMA`): `{d200.closed_strictly_above}`")
+                            st.write(f"- Precio > SMA hace 5-15 velas: `{d200.was_above_in_5_to_15}` | Toque: `{d200.touched_recently}` | Rebote: `{d200.closed_strictly_above}`")
+                            if bt.sma_200.events_count > 0:
+                                st.write(
+                                    f"- **Backtest ({bt.sma_200.events_count} rebotes)**: "
+                                    f"+5v Acierto `{bt.sma_200.win_rate_5_pct:.0f}%` (Media `{bt.sma_200.avg_return_5_pct:+.2f}%`) · "
+                                    f"+10v Acierto `{bt.sma_200.win_rate_10_pct:.0f}%` (Media `{bt.sma_200.avg_return_10_pct:+.2f}%`)"
+                                )
 
             # Panel desplegable discreto con tickers omitidos
             omitted_items: List[Dict[str, str]] = []
@@ -626,7 +899,7 @@ def main() -> None:
         st.subheader("Universo Maestro Completo (580 valores sin recortes)")
         u_market = st.selectbox(
             "Índice a inspeccionar",
-            options=["IBEX35", "DAX", "SP500"],
+            options=["IBEX35", "DAX", "SP500", "EUROPE"],
             format_func=lambda m: str(MARKETS_METADATA[m]["label"]),
             key="universe_market",
         )
@@ -646,8 +919,10 @@ def main() -> None:
               cotización previa sobre la media hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]`.
             - **Modo B — Toque y Rebote Estricto**: Exige toque o perforación leve en el mínimo de la vela actual o anterior
               (`Low <= SMA * 1.002`) viniendo de cotizar por encima hace 5–15 velas, con cierre actual estrictamente superior (`Close > SMA`).
-            - **Compatibilidad Dual**: Este repositorio puede ejecutarse tanto en **Streamlit Cloud** (`streamlit run app.py`)
-              como en hosting estático **Vite + React + TypeScript** (`npm run build`).
+            - **Filtros Técnicos Avanzados**: Golden Cross (`SMA 50 > SMA 200`), RSI(14) de Wilder, distancia normalizada en ATR(14)
+              y volumen relativo mínimo sobre media de 20 velas.
+            - **Backtest Rápido Histórico**: Mide sobre la serie descargada la tasa de acierto y retorno medio a +5 y +10 velas tras cada rebote Modo B.
+            - **Fuente Única de Verdad (`data/tickers.json`)**: Los 580 tickers oficiales son compartidos entre TypeScript y Python, validados por GitHub Actions CI.
             """
         )
 

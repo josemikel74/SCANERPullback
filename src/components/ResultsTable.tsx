@@ -13,6 +13,7 @@ import {
   Minus,
   Play,
   RotateCcw,
+  Star,
 } from 'lucide-react';
 import type {
   MarketId,
@@ -43,6 +44,8 @@ interface ResultsTableProps {
   onSort: (column: SortColumn) => void;
   onSelectStock: (stock: StockAnalysisResult) => void;
   selectedTicker: string | null;
+  watchlistSet: Set<string>;
+  onToggleWatchlist: (ticker: string) => void;
   onResetFilters: () => void;
   onStartScan: () => void;
   onExportCsv: () => void;
@@ -68,10 +71,22 @@ function formatSignedPct(value: number | null): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function getDisplayAtrDistance(
+  row: StockAnalysisResult,
+  smaFilter: SmaFilter
+): number | null {
+  if (smaFilter === 'SMA50') return row.atrDistance50;
+  if (smaFilter === 'SMA200') return row.atrDistance200;
+  if (row.atrDistance50 !== null && row.atrDistance200 !== null) {
+    return Math.abs(row.atrDistance50) <= Math.abs(row.atrDistance200)
+      ? row.atrDistance50
+      : row.atrDistance200;
+  }
+  return row.atrDistance50 ?? row.atrDistance200;
+}
+
 /**
- * Celda enriquecida para Distancia Porcentual:
- * - Porcentaje exacto con signo y 2 decimales (+0.38% en verde esmeralda, -0.45% en ámbar dentro de la banda)
- * - Micro-barra visual centrada en 0.00%
+ * Celda enriquecida para Distancia Porcentual con micro-barra centrada en 0.00%.
  */
 function DistanceCell({
   distancePct,
@@ -109,7 +124,6 @@ function DistanceCell({
     barColor = 'bg-[#CBD5E1]';
   }
 
-  // Escala visual simétrica centrada en 0.00% (rango ±max(5%, umbral*2))
   const scaleMax = Math.max(5, absThreshold * 2);
   const clampedRatio = Math.min(1, Math.abs(distancePct) / scaleMax);
   const halfBarPct = Math.max(4, Math.round(clampedRatio * 50));
@@ -123,9 +137,7 @@ function DistanceCell({
         aria-hidden="true"
         className="relative w-20 h-1.5 bg-[#E2E8F0] rounded-full overflow-hidden"
       >
-        {/* Marca central 0.00% */}
         <span className="absolute left-1/2 top-0 bottom-0 w-px bg-[#64748B] z-10 -translate-x-1/2" />
-        {/* Relleno desde 0.00% hacia derecha (+) o izquierda (-) */}
         {isAbove ? (
           <span
             className={`absolute top-0 bottom-0 left-1/2 rounded-r-full ${barColor}`}
@@ -145,12 +157,6 @@ function DistanceCell({
   );
 }
 
-/**
- * Insignia diferenciada de Media Móvil Objetivo:
- * - SMA 50 (azul)
- * - SMA 200 (índigo/morado)
- * - Confluencia 50 + 200 (dorado)
- */
 function SmaBadge({
   match50,
   match200,
@@ -200,6 +206,8 @@ export function ResultsTable({
   onSort,
   onSelectStock,
   selectedTicker,
+  watchlistSet,
+  onToggleWatchlist,
   onResetFilters,
   onStartScan,
   onExportCsv,
@@ -411,13 +419,14 @@ export function ResultsTable({
           </p>
           <p className="text-xs text-[#64748B] max-w-lg mx-auto">
             Pulsa iniciar para descargar las series históricas OHLC reales desde Yahoo Finance
-            y evaluar pullbacks sobre SMA 50 y SMA 200.
+            y evaluar pullbacks sobre SMA 50 y SMA 200, RSI (14), ATR (14) y backtest histórico.
           </p>
           <div className="pt-2">
             <button
               type="button"
               onClick={onStartScan}
-              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#1D4ED8] rounded-lg hover:bg-[#1E40AF] transition-colors"
+              disabled={totalMarketTickers === 0}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#1D4ED8] rounded-lg hover:bg-[#1E40AF] disabled:opacity-50 transition-colors"
             >
               <Play className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
               <span>Iniciar Escaneo Ahora</span>
@@ -432,8 +441,8 @@ export function ResultsTable({
               : 'Ningún valor coincide con los criterios seleccionados'}
           </p>
           <p className="text-xs text-[#64748B] max-w-md mx-auto">
-            Puedes ampliar el rango de proximidad en el Modo A, activar «Mostrando todo el
-            índice» para inspeccionar todas las cotizaciones o restablecer los filtros.
+            Puedes ampliar el rango de proximidad en el Modo A, relajar los filtros técnicos avanzados
+            (RSI / Golden Cross / Volumen) o restablecer los filtros.
           </p>
           <div className="pt-2">
             <button
@@ -452,7 +461,10 @@ export function ResultsTable({
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="border-b border-[#E2E8F0] bg-[#F8FAFC] text-[11px] font-semibold text-[#475569]">
-                  <th className="py-2.5 pl-5 pr-3 whitespace-nowrap">
+                  <th className="py-2.5 pl-4 pr-1 w-9 text-center" aria-label="Favorito Watchlist">
+                    ★
+                  </th>
+                  <th className="py-2.5 pl-2 pr-3 whitespace-nowrap">
                     <button
                       type="button"
                       onClick={() => onSort('ticker')}
@@ -508,6 +520,26 @@ export function ResultsTable({
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
+                      onClick={() => onSort('rsi14')}
+                      className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
+                    >
+                      <span>RSI 14</span>
+                      {renderSortIcon('rsi14')}
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => onSort('atrDistance')}
+                      className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
+                    >
+                      <span>Dist. ATR</span>
+                      {renderSortIcon('atrDistance')}
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
                       onClick={() => onSort('volumeRatio')}
                       className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
                     >
@@ -524,6 +556,8 @@ export function ResultsTable({
                   const isSelected = selectedTicker === row.ticker;
                   const isPositive = row.changePct >= 0;
                   const { m50, m200 } = getActiveSmaMatches(row);
+                  const isWatched = watchlistSet.has(row.ticker);
+                  const atrDist = getDisplayAtrDistance(row, smaFilter);
 
                   return (
                     <tr
@@ -533,7 +567,36 @@ export function ResultsTable({
                         isSelected ? 'bg-[#EFF6FF]' : 'hover:bg-[#F8FAFC]'
                       }`}
                     >
-                      <td className="py-2 pl-5 pr-3 max-w-[250px]">
+                      <td className="py-2 pl-4 pr-1 text-center">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleWatchlist(row.ticker);
+                          }}
+                          title={
+                            isWatched
+                              ? `Quitar ${row.ticker} de Watchlist`
+                              : `Añadir ${row.ticker} a Watchlist`
+                          }
+                          aria-label={
+                            isWatched
+                              ? `Quitar ${row.ticker} de Watchlist`
+                              : `Añadir ${row.ticker} a Watchlist`
+                          }
+                          className="p-1 rounded hover:bg-[#F1F5F9] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+                        >
+                          <Star
+                            className={`w-3.5 h-3.5 ${
+                              isWatched
+                                ? 'text-[#D97706] fill-[#F59E0B]'
+                                : 'text-[#CBD5E1] hover:text-[#94A3B8]'
+                            }`}
+                            aria-hidden="true"
+                          />
+                        </button>
+                      </td>
+                      <td className="py-2 pl-2 pr-3 max-w-[235px]">
                         <div className="flex items-center gap-2 truncate">
                           <a
                             href={`https://finance.yahoo.com/quote/${encodeURIComponent(row.ticker)}`}
@@ -582,6 +645,14 @@ export function ResultsTable({
                           distancePct={row.distanceSma200Pct}
                           thresholdPct={proximityThresholdPct}
                         />
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-[#334155] tabular-nums whitespace-nowrap">
+                        {row.rsi14 !== null ? row.rsi14.toFixed(1) : '—'}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-[#475569] tabular-nums whitespace-nowrap">
+                        {atrDist !== null
+                          ? `${atrDist >= 0 ? '+' : ''}${atrDist.toFixed(2)}`
+                          : '—'}
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-[#475569] tabular-nums whitespace-nowrap">
                         {row.volumeRatio.toFixed(2).replace('.', ',')}x

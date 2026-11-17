@@ -9,7 +9,7 @@ import {
 } from '../data/tickersData';
 import type { MarketId } from '../types/market';
 
-const MARKETS: MarketId[] = ['IBEX35', 'DAX', 'SP500'];
+const MARKETS: MarketId[] = ['IBEX35', 'DAX', 'SP500', 'EUROPE'];
 
 export function UniverseView() {
   const [selectedMarket, setSelectedMarket] = useState<MarketId>('IBEX35');

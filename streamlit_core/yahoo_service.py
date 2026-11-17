@@ -26,6 +26,7 @@ YAHOO_CHART_HOSTS = (
 DEFAULT_TIMEOUT_SEC = 8.0
 DEFAULT_BATCH_SIZE = 6
 DEFAULT_BATCH_DELAY_SEC = 0.3
+YF_VECTORIZED_CHUNK_SIZE = 40
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -75,14 +76,8 @@ def aggregate_hourly_to_4h(hourly_candles: List[Dict[str, Any]]) -> List[Dict[st
     return aggregated
 
 
-def _fetch_via_yfinance(ticker: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    """Usa yfinance (con gestión automática de cookies/crumb) cuando está disponible."""
-    if _yf is None:
-        return None
-
-    interval, period = map_timeframe_to_yahoo_params(timeframe)
-    hist = _yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
-    if hist is None or hist.empty:
+def _dataframe_to_result(hist: Any, ticker: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    if hist is None or getattr(hist, "empty", True):
         return None
 
     raw_candles: List[Dict[str, Any]] = []
@@ -92,7 +87,17 @@ def _fetch_via_yfinance(ticker: str, timeframe: str) -> Optional[Dict[str, Any]]
         l = float(row.get("Low", float("nan")))
         c = float(row.get("Close", float("nan")))
         v = float(row.get("Volume", 0.0))
-        if math.isfinite(o) and math.isfinite(h) and math.isfinite(l) and math.isfinite(c) and c > 0:
+        if (
+            math.isfinite(o)
+            and math.isfinite(h)
+            and math.isfinite(l)
+            and math.isfinite(c)
+            and o > 0
+            and h > 0
+            and l > 0
+            and c > 0
+            and h >= l
+        ):
             ts_ms = int(idx.timestamp() * 1000) if hasattr(idx, "timestamp") else 0
             raw_candles.append(
                 {
@@ -122,6 +127,56 @@ def _fetch_via_yfinance(ticker: str, timeframe: str) -> Optional[Dict[str, Any]]
         "previous_close": prev_c["close"],
         "fetched_at": int(time.time() * 1000),
     }
+
+
+def _fetch_via_yfinance(ticker: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    """Usa yfinance (con gestión automática de cookies/crumb) cuando está disponible."""
+    if _yf is None:
+        return None
+
+    interval, period = map_timeframe_to_yahoo_params(timeframe)
+    hist = _yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+    return _dataframe_to_result(hist, ticker, timeframe)
+
+
+def _fetch_chunk_via_yfinance_download(
+    chunk: List[str], timeframe: str
+) -> Dict[str, Dict[str, Any]]:
+    """Descarga vectorizada con yf.download(threads=True) para acelerar escaneos de S&P 500."""
+    if _yf is None or len(chunk) <= 1:
+        return {}
+
+    interval, period = map_timeframe_to_yahoo_params(timeframe)
+    resolved: Dict[str, Dict[str, Any]] = {}
+    try:
+        df = _yf.download(
+            tickers=chunk,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
+
+    if df is None or getattr(df, "empty", True):
+        return {}
+
+    columns = getattr(df, "columns", None)
+    is_multi = getattr(columns, "nlevels", 1) > 1
+    for ticker in chunk:
+        try:
+            sub = df[ticker] if (is_multi and ticker in columns.get_level_values(0)) else None
+            if sub is None:
+                continue
+            parsed = _dataframe_to_result(sub.dropna(how="all"), ticker, timeframe)
+            if parsed is not None:
+                resolved[ticker] = parsed
+        except Exception:
+            continue
+    return resolved
 
 
 def _fetch_json_with_retry(
@@ -163,13 +218,11 @@ def fetch_yahoo_candles(
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
     """Descarga series históricas OHLCV reales desde Yahoo Finance."""
-    # 1. Intentar con yfinance cuando esté instalado (entorno Streamlit Cloud / local)
     if _yf is not None:
         yf_result = _fetch_via_yfinance(ticker, timeframe)
         if yf_result is not None:
             return yf_result
 
-    # 2. Respaldo directo contra endpoint v8 rotando query1 / query2
     interval, range_str = map_timeframe_to_yahoo_params(timeframe)
     payload = _fetch_json_with_retry(ticker, interval, range_str, timeout_sec=timeout_sec)
 
@@ -213,7 +266,11 @@ def fetch_yahoo_candles(
             and math.isfinite(h)
             and math.isfinite(l)
             and math.isfinite(c)
+            and o > 0
+            and h > 0
+            and l > 0
             and c > 0
+            and h >= l
         ):
             raw_candles.append(
                 {
@@ -271,19 +328,41 @@ def fetch_market_batch(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_delay_sec: float = DEFAULT_BATCH_DELAY_SEC,
 ) -> Dict[str, Any]:
-    """Descarga en lotes controlados de 6 peticiones simultáneas con pausa de 300ms."""
+    """
+    Descarga masiva vectorizada con yf.download(threads=True) cuando yfinance está disponible,
+    con respaldo automático por lotes controlados de 6 peticiones contra query1/query2.
+    """
     total = len(tickers)
     results: List[Dict[str, Any]] = []
     incidents: List[Dict[str, str]] = []
     processed = 0
     aborted = False
 
-    for i in range(0, total, batch_size):
-        if should_stop and should_stop():
+    remaining_tickers: List[str] = []
+    if _yf is not None and total > 1:
+        for i in range(0, total, YF_VECTORIZED_CHUNK_SIZE):
+            if should_stop and should_stop():
+                aborted = True
+                break
+            chunk = tickers[i : i + YF_VECTORIZED_CHUNK_SIZE]
+            chunk_results = _fetch_chunk_via_yfinance_download(chunk, timeframe)
+            for ticker in chunk:
+                if ticker in chunk_results:
+                    results.append(chunk_results[ticker])
+                    processed += 1
+                else:
+                    remaining_tickers.append(ticker)
+            if on_progress:
+                on_progress(processed, total, len(incidents))
+    else:
+        remaining_tickers = list(tickers)
+
+    for i in range(0, len(remaining_tickers), batch_size):
+        if aborted or (should_stop and should_stop()):
             aborted = True
             break
 
-        chunk = tickers[i : i + batch_size]
+        chunk = remaining_tickers[i : i + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_map = {
                 executor.submit(fetch_yahoo_candles, ticker, timeframe): ticker
@@ -311,7 +390,7 @@ def fetch_market_batch(
         if aborted:
             break
 
-        if i + batch_size < total:
+        if i + batch_size < len(remaining_tickers):
             time.sleep(batch_delay_sec)
 
     return {

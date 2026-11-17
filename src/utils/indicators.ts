@@ -1,5 +1,7 @@
 import type {
+  BacktestSmaSummary,
   OHLCVCandle,
+  PullbackBacktestStats,
   SmaDiagnostics,
   SmaEvaluationOutput,
 } from '../types/market';
@@ -8,6 +10,8 @@ export const SMA_SHORT_PERIOD = 50;
 export const SMA_LONG_PERIOD = 200;
 export const SMA_HISTORY_LOOKBACK = 15;
 export const BOUNCE_TOUCH_TOLERANCE = 1.002;
+export const RSI_DEFAULT_PERIOD = 14;
+export const ATR_DEFAULT_PERIOD = 14;
 
 /**
  * Configuración para la evaluación de estrategias de pullback sobre SMA 50 y SMA 200.
@@ -75,6 +79,32 @@ export function calculateSMA(closes: number[], period: number): number | null {
 }
 
 /**
+ * Calcula la serie completa O(n) de SMA usando sumas prefijas para gráficos y backtest.
+ */
+export function calculateSMASeries(
+  closes: number[],
+  period: number
+): Array<number | null> {
+  const n = closes.length;
+  const result: Array<number | null> = new Array(n).fill(null);
+  if (period <= 0 || n < period) {
+    return result;
+  }
+
+  let rollingSum = 0;
+  for (let i = 0; i < n; i++) {
+    rollingSum += closes[i];
+    if (i >= period) {
+      rollingSum -= closes[i - period];
+    }
+    if (i >= period - 1) {
+      result[i] = rollingSum / period;
+    }
+  }
+  return result;
+}
+
+/**
  * Calcula la SMA actual y la de las últimas `lookback` velas (por defecto 15),
  * devolviendo un arreglo indexado por `offsetFromEnd` (`0` = actual, `15` = hace 15 velas).
  */
@@ -88,6 +118,215 @@ export function calculateSMALastCandles(
     series.push(calculateSMAAtOffset(closes, period, offset));
   }
   return series;
+}
+
+/**
+ * Calcula la serie completa de RSI (14) usando el suavizado clásico de Wilder.
+ */
+export function calculateRSISeries(
+  closes: number[],
+  period = RSI_DEFAULT_PERIOD
+): Array<number | null> {
+  const n = closes.length;
+  const result: Array<number | null> = new Array(n).fill(null);
+  if (period <= 0 || n <= period) {
+    return result;
+  }
+
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) {
+      gainSum += diff;
+    } else {
+      lossSum += Math.abs(diff);
+    }
+  }
+
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+  result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < n; i++) {
+    const diff = closes[i] - closes[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? Math.abs(diff) : 0;
+
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+
+    if (avgLoss === 0) {
+      result[i] = 100;
+    } else {
+      const rs = avgGain / avgLoss;
+      result[i] = 100 - 100 / (1 + rs);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Calcula el último RSI (14) disponible.
+ */
+export function calculateRSI14(
+  closes: number[],
+  period = RSI_DEFAULT_PERIOD
+): number | null {
+  const series = calculateRSISeries(closes, period);
+  return series.length > 0 ? series[series.length - 1] : null;
+}
+
+/**
+ * Calcula el ATR (14) de Wilder sobre velas OHLC válidas.
+ */
+export function calculateATR14(
+  validCandles: OHLCVCandle[],
+  period = ATR_DEFAULT_PERIOD
+): number | null {
+  const n = validCandles.length;
+  if (period <= 0 || n <= period) {
+    return null;
+  }
+
+  const trueRanges: number[] = new Array(n).fill(0);
+  trueRanges[0] = validCandles[0].high - validCandles[0].low;
+  for (let i = 1; i < n; i++) {
+    const cur = validCandles[i];
+    const prevClose = validCandles[i - 1].close;
+    trueRanges[i] = Math.max(
+      cur.high - cur.low,
+      Math.abs(cur.high - prevClose),
+      Math.abs(cur.low - prevClose)
+    );
+  }
+
+  let trSum = 0;
+  for (let i = 1; i <= period; i++) {
+    trSum += trueRanges[i];
+  }
+  let atr = trSum / period;
+
+  for (let i = period + 1; i < n; i++) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period;
+  }
+
+  return Number.isFinite(atr) && atr > 0 ? atr : null;
+}
+
+function emptyBacktestSummary(): BacktestSmaSummary {
+  return {
+    eventsCount: 0,
+    winRate5Pct: null,
+    avgReturn5Pct: null,
+    winRate10Pct: null,
+    avgReturn10Pct: null,
+  };
+}
+
+/**
+ * Backtest histórico rápido sobre las velas ya descargadas (sin peticiones extra).
+ * Detecta eventos pasados de Modo B (Toque y Rebote Estricto) y mide tasa de acierto y
+ * retorno medio a +5 y +10 velas con enfriamiento de 5 velas para evitar solapamientos.
+ */
+function backtestSingleSma(
+  validCandles: OHLCVCandle[],
+  closes: number[],
+  period: number
+): BacktestSmaSummary {
+  const n = validCandles.length;
+  const minIndex = period + SMA_HISTORY_LOOKBACK;
+  const maxIndex = n - 11;
+  if (maxIndex < minIndex) {
+    return emptyBacktestSummary();
+  }
+
+  const smaSeries = calculateSMASeries(closes, period);
+  const returns5: number[] = [];
+  const returns10: number[] = [];
+  let lastSignalIndex = -100;
+
+  for (let i = minIndex; i <= maxIndex; i++) {
+    if (i - lastSignalIndex < 5) {
+      continue;
+    }
+
+    const smaCur = smaSeries[i];
+    const smaPrev = smaSeries[i - 1];
+    if (smaCur === null || smaCur <= 0 || smaPrev === null || smaPrev <= 0) {
+      continue;
+    }
+
+    let checked = 0;
+    let aboveCount = 0;
+    for (let offset = 5; offset <= 15; offset++) {
+      const idx = i - offset;
+      const smaAtOffset = smaSeries[idx];
+      if (idx >= 0 && smaAtOffset !== null && smaAtOffset > 0) {
+        checked += 1;
+        if (validCandles[idx].close > smaAtOffset) {
+          aboveCount += 1;
+        }
+      }
+    }
+
+    const wasAbove = checked > 0 && aboveCount >= Math.ceil(checked * 0.6);
+    if (!wasAbove) continue;
+
+    const cur = validCandles[i];
+    const prev = validCandles[i - 1];
+    const touched =
+      cur.low <= smaCur * BOUNCE_TOUCH_TOLERANCE ||
+      prev.low <= smaPrev * BOUNCE_TOUCH_TOLERANCE;
+    if (!touched || cur.close <= smaCur) {
+      continue;
+    }
+
+    const ret5 = ((validCandles[i + 5].close - cur.close) / cur.close) * 100;
+    const ret10 = ((validCandles[i + 10].close - cur.close) / cur.close) * 100;
+    returns5.push(ret5);
+    returns10.push(ret10);
+    lastSignalIndex = i;
+  }
+
+  if (returns5.length === 0) {
+    return emptyBacktestSummary();
+  }
+
+  const wins5 = returns5.filter((r) => r > 0).length;
+  const wins10 = returns10.filter((r) => r > 0).length;
+  const avg5 = returns5.reduce((a, b) => a + b, 0) / returns5.length;
+  const avg10 = returns10.reduce((a, b) => a + b, 0) / returns10.length;
+
+  return {
+    eventsCount: returns5.length,
+    winRate5Pct: (wins5 / returns5.length) * 100,
+    avgReturn5Pct: avg5,
+    winRate10Pct: (wins10 / returns10.length) * 100,
+    avgReturn10Pct: avg10,
+  };
+}
+
+export function runPullbackBacktest(
+  validCandles: OHLCVCandle[],
+  shortPeriod = SMA_SHORT_PERIOD,
+  longPeriod = SMA_LONG_PERIOD
+): PullbackBacktestStats {
+  if (validCandles.length < shortPeriod + SMA_HISTORY_LOOKBACK + 11) {
+    return {
+      evaluatedBars: validCandles.length,
+      sma50: emptyBacktestSummary(),
+      sma200: emptyBacktestSummary(),
+    };
+  }
+
+  const closes = validCandles.map((c) => c.close);
+  return {
+    evaluatedBars: validCandles.length,
+    sma50: backtestSingleSma(validCandles, closes, shortPeriod),
+    sma200: backtestSingleSma(validCandles, closes, longPeriod),
+  };
 }
 
 function emptyDiagnostics(): SmaDiagnostics {
@@ -206,7 +445,8 @@ function evaluateSingleSma(
 }
 
 /**
- * Motor matemático completo de evaluación de pullbacks sobre SMA 50 y SMA 200.
+ * Motor matemático completo de evaluación de pullbacks sobre SMA 50/200, RSI(14), ATR(14),
+ * Golden Cross y Backtest rápido sobre velas descargadas.
  */
 export function evaluatePullbackSignals(
   candles: OHLCVCandle[],
@@ -227,12 +467,23 @@ export function evaluatePullbackSignals(
       bounceMatch200: false,
       diagnostics50: emptyDiagnostics(),
       diagnostics200: emptyDiagnostics(),
+      rsi14: null,
+      atr14: null,
+      atrDistance50: null,
+      atrDistance200: null,
+      isGoldenCross: false,
+      backtest: {
+        evaluatedBars: 0,
+        sma50: emptyBacktestSummary(),
+        sma200: emptyBacktestSummary(),
+      },
     };
   }
 
   const shortPeriod = config.shortPeriod ?? SMA_SHORT_PERIOD;
   const longPeriod = config.longPeriod ?? SMA_LONG_PERIOD;
   const closes = validCandles.map((c) => c.close);
+  const currentClose = closes[closes.length - 1];
 
   const eval50 = evaluateSingleSma(
     validCandles,
@@ -247,10 +498,24 @@ export function evaluatePullbackSignals(
     config.proximityThresholdPct
   );
 
+  const rsi14 = calculateRSI14(closes, RSI_DEFAULT_PERIOD);
+  const atr14 = calculateATR14(validCandles, ATR_DEFAULT_PERIOD);
+
+  const sma50 = eval50.diagnostics.smaCurrent;
+  const sma200 = eval200.diagnostics.smaCurrent;
+
+  const atrDistance50 =
+    atr14 !== null && atr14 > 0 && sma50 !== null ? (currentClose - sma50) / atr14 : null;
+  const atrDistance200 =
+    atr14 !== null && atr14 > 0 && sma200 !== null ? (currentClose - sma200) / atr14 : null;
+
+  const isGoldenCross = sma50 !== null && sma200 !== null && sma50 > sma200;
+  const backtest = runPullbackBacktest(validCandles, shortPeriod, longPeriod);
+
   return {
     validCandlesCount: validCandles.length,
-    sma50: eval50.diagnostics.smaCurrent,
-    sma200: eval200.diagnostics.smaCurrent,
+    sma50,
+    sma200,
     distanceSma50Pct: eval50.diagnostics.distancePct,
     distanceSma200Pct: eval200.diagnostics.distancePct,
     proximityMatch50: eval50.proximityMatch,
@@ -259,5 +524,11 @@ export function evaluatePullbackSignals(
     bounceMatch200: eval200.bounceMatch,
     diagnostics50: eval50.diagnostics,
     diagnostics200: eval200.diagnostics,
+    rsi14,
+    atr14,
+    atrDistance50,
+    atrDistance200,
+    isGoldenCross,
+    backtest,
   };
 }

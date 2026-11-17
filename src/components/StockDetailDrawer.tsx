@@ -1,10 +1,17 @@
-import { Check, Minus, TrendingDown, TrendingUp, X } from 'lucide-react';
+import { Check, Minus, Star, TrendingDown, TrendingUp, X } from 'lucide-react';
 import { MARKETS_METADATA } from '../data/tickersData';
-import type { SmaDiagnostics, StockAnalysisResult } from '../types/market';
+import type {
+  BacktestSmaSummary,
+  SmaDiagnostics,
+  StockAnalysisResult,
+} from '../types/market';
+import { CandlestickChart } from './CandlestickChart';
 
 interface StockDetailDrawerProps {
   stock: StockAnalysisResult | null;
   proximityThresholdPct: number;
+  isWatched: boolean;
+  onToggleWatchlist: (ticker: string) => void;
   onClose: () => void;
 }
 
@@ -15,6 +22,11 @@ function formatCurrency(val: number | null, symbol: '€' | '$'): string {
     maximumFractionDigits: 2,
   });
   return symbol === '€' ? `${num} €` : `$${num}`;
+}
+
+function formatSignedPct(val: number | null): string {
+  if (val === null || !Number.isFinite(val)) return '—';
+  return `${val > 0 ? '+' : ''}${val.toFixed(2)}%`;
 }
 
 function FormulaCheckRow({
@@ -48,11 +60,13 @@ function FormulaCheckRow({
 function SmaDiagnosticCard({
   title,
   diag,
+  atrDist,
   symbol,
   proximityThresholdPct,
 }: {
   title: string;
   diag: SmaDiagnostics;
+  atrDist: number | null;
   symbol: '€' | '$';
   proximityThresholdPct: number;
 }) {
@@ -64,9 +78,17 @@ function SmaDiagnosticCard({
     <div className="border border-[#E2E8F0] rounded-lg p-4 space-y-2">
       <div className="flex items-center justify-between">
         <h4 className="font-semibold text-[#0F172A]">{title}</h4>
-        <span className="font-mono text-xs font-semibold text-[#0F172A] tabular-nums">
-          {formatCurrency(diag.smaCurrent, symbol)}
-        </span>
+        <div className="flex items-center gap-2 font-mono text-xs tabular-nums">
+          {atrDist !== null && (
+            <span className="text-[#64748B]">
+              {atrDist >= 0 ? '+' : ''}
+              {atrDist.toFixed(2)} ATR
+            </span>
+          )}
+          <span className="font-semibold text-[#0F172A]">
+            {formatCurrency(diag.smaCurrent, symbol)}
+          </span>
+        </div>
       </div>
 
       {diag.smaCurrent === null ? (
@@ -88,11 +110,7 @@ function SmaDiagnosticCard({
           <FormulaCheckRow
             label={`Modo A · Zona (±${proximityThresholdPct.toFixed(1)}%)`}
             passed={withinZone}
-            detail={
-              diag.distancePct !== null
-                ? `${diag.distancePct >= 0 ? '+' : ''}${diag.distancePct.toFixed(2)}%`
-                : '—'
-            }
+            detail={formatSignedPct(diag.distancePct)}
           />
           <FormulaCheckRow
             label="Modo B · Toque (Low ≤ SMA × 1.002)"
@@ -110,9 +128,64 @@ function SmaDiagnosticCard({
   );
 }
 
+function BacktestSummaryCard({
+  title,
+  summary,
+}: {
+  title: string;
+  summary: BacktestSmaSummary;
+}) {
+  return (
+    <div className="border border-[#E2E8F0] rounded-lg p-3.5 bg-[#F8FAFC] space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-[#0F172A]">{title}</span>
+        <span className="font-mono text-[11px] text-[#475569] tabular-nums">
+          {summary.eventsCount} {summary.eventsCount === 1 ? 'rebote' : 'rebotes'}
+        </span>
+      </div>
+      {summary.eventsCount === 0 ? (
+        <p className="text-[11px] text-[#64748B]">
+          Sin eventos históricos de toque y rebote en la serie descargada.
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 text-[11px]">
+          <div className="bg-white border border-[#E2E8F0] rounded p-2 space-y-0.5">
+            <span className="block text-[#64748B]">Horizonte +5 velas</span>
+            <span className="block font-mono font-semibold text-[#0F172A] tabular-nums">
+              Acierto: {summary.winRate5Pct?.toFixed(0)}%
+            </span>
+            <span
+              className={`block font-mono tabular-nums ${
+                (summary.avgReturn5Pct ?? 0) >= 0 ? 'text-[#059669]' : 'text-[#DC2626]'
+              }`}
+            >
+              Media: {formatSignedPct(summary.avgReturn5Pct)}
+            </span>
+          </div>
+          <div className="bg-white border border-[#E2E8F0] rounded p-2 space-y-0.5">
+            <span className="block text-[#64748B]">Horizonte +10 velas</span>
+            <span className="block font-mono font-semibold text-[#0F172A] tabular-nums">
+              Acierto: {summary.winRate10Pct?.toFixed(0)}%
+            </span>
+            <span
+              className={`block font-mono tabular-nums ${
+                (summary.avgReturn10Pct ?? 0) >= 0 ? 'text-[#059669]' : 'text-[#DC2626]'
+              }`}
+            >
+              Media: {formatSignedPct(summary.avgReturn10Pct)}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function StockDetailDrawer({
   stock,
   proximityThresholdPct,
+  isWatched,
+  onToggleWatchlist,
   onClose,
 }: StockDetailDrawerProps) {
   if (!stock) {
@@ -139,24 +212,51 @@ export function StockDetailDrawer({
             <span className="font-mono tabular-nums">
               {stock.validCandlesCount} velas válidas ({stock.candlesCount} brutas)
             </span>
+            {stock.isGoldenCross && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-semibold text-[#059669]">
+                  Golden Cross (SMA 50 &gt; 200)
+                </span>
+              </>
+            )}
           </div>
           <h3 className="text-lg font-bold text-[#0F172A]">
             <span className="font-mono mr-2">{stock.ticker}</span>
             <span className="font-semibold text-[#334155]">{stock.name}</span>
           </h3>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Cerrar detalle del valor"
-          className="p-2 text-[#64748B] hover:text-[#0F172A] hover:bg-[#F8FAFC] rounded-lg transition-colors"
-        >
-          <X className="w-4 h-4" aria-hidden="true" />
-        </button>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => onToggleWatchlist(stock.ticker)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+              isWatched
+                ? 'bg-[#FEF3C7] border-[#FDE68A] text-[#B45309]'
+                : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#475569] hover:text-[#0F172A]'
+            }`}
+          >
+            <Star
+              className={`w-3.5 h-3.5 ${isWatched ? 'fill-current' : ''}`}
+              aria-hidden="true"
+            />
+            <span>{isWatched ? 'En Watchlist' : 'Añadir a Watchlist'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Cerrar detalle del valor"
+            className="p-2 text-[#64748B] hover:text-[#0F172A] hover:bg-[#F8FAFC] rounded-lg transition-colors"
+          >
+            <X className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
-      {/* Métricas principales */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {/* Métricas principales + RSI(14) + ATR(14) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
           <span className="block text-[11px] font-medium text-[#64748B]">Precio actual</span>
           <span className="block text-base font-mono font-semibold text-[#0F172A] tabular-nums">
@@ -182,42 +282,86 @@ export function StockDetailDrawer({
         </div>
 
         <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
-          <span className="block text-[11px] font-medium text-[#64748B]">Última vela OHLC</span>
-          <span className="block text-xs font-mono text-[#0F172A] tabular-nums">
-            O {formatCurrency(stock.open, stock.currencySymbol)} · H{' '}
-            {formatCurrency(stock.high, stock.currencySymbol)}
+          <span className="block text-[11px] font-medium text-[#64748B]">RSI (14)</span>
+          <span className="block text-base font-mono font-semibold text-[#0F172A] tabular-nums">
+            {stock.rsi14 !== null ? stock.rsi14.toFixed(1) : '—'}
           </span>
-          <span className="block text-xs font-mono text-[#475569] tabular-nums">
-            L {formatCurrency(stock.low, stock.currencySymbol)} · C{' '}
-            {formatCurrency(stock.price, stock.currencySymbol)}
+          <span className="block text-[11px] text-[#64748B]">
+            {stock.rsi14 === null
+              ? 'Sin datos'
+              : stock.rsi14 >= 70
+                ? 'Sobrecompra'
+                : stock.rsi14 <= 30
+                  ? 'Sobreventa'
+                  : 'Zona neutral'}
           </span>
         </div>
 
         <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
-          <span className="block text-[11px] font-medium text-[#64748B]">Diagnóstico</span>
-          <span className="block text-xs font-medium text-[#0F172A] leading-snug">
-            {stock.signalSummary}
+          <span className="block text-[11px] font-medium text-[#64748B]">ATR (14) &amp; Vol.</span>
+          <span className="block text-base font-mono font-semibold text-[#0F172A] tabular-nums">
+            {formatCurrency(stock.atr14, stock.currencySymbol)}
           </span>
           <span className="block text-[11px] text-[#64748B] font-mono tabular-nums">
             Vol {stock.volumeRatio.toFixed(2)}x · {stock.proxyUsed}
           </span>
         </div>
+
+        <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1 col-span-2 sm:col-span-1">
+          <span className="block text-[11px] font-medium text-[#64748B]">Diagnóstico</span>
+          <span className="block text-xs font-medium text-[#0F172A] leading-snug">
+            {stock.signalSummary}
+          </span>
+        </div>
       </div>
+
+      {/* Gráfico interactivo OHLC + SMA 50 + SMA 200 */}
+      <CandlestickChart
+        candles={stock.candles}
+        symbol={stock.currencySymbol}
+        timeframe={stock.timeframe}
+        proximityThresholdPct={proximityThresholdPct}
+        matchedSma={stock.matchedSma}
+      />
 
       {/* Auditoría matemática de fórmulas SMA 50 y SMA 200 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
         <SmaDiagnosticCard
           title="Verificación Matemática SMA 50"
           diag={stock.diagnostics50}
+          atrDist={stock.atrDistance50}
           symbol={stock.currencySymbol}
           proximityThresholdPct={proximityThresholdPct}
         />
         <SmaDiagnosticCard
           title="Verificación Matemática SMA 200"
           diag={stock.diagnostics200}
+          atrDist={stock.atrDistance200}
           symbol={stock.currencySymbol}
           proximityThresholdPct={proximityThresholdPct}
         />
+      </div>
+
+      {/* Backtest rápido sobre velas descargadas */}
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="text-xs font-bold text-[#0F172A]">
+            Backtest Histórico Rápido (Modo B sobre {stock.backtest.evaluatedBars} velas)
+          </h4>
+          <span className="text-[11px] text-[#64748B]">
+            Calculado en memoria sobre la serie descargada · Enfriamiento 5 velas
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <BacktestSummaryCard
+            title="Histórico de Rebotes en SMA 50"
+            summary={stock.backtest.sma50}
+          />
+          <BacktestSummaryCard
+            title="Histórico de Rebotes en SMA 200"
+            summary={stock.backtest.sma200}
+          />
+        </div>
       </div>
     </aside>
   );

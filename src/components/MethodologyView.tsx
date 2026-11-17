@@ -4,12 +4,14 @@ export function MethodologyView() {
       <section className="bg-white border border-[#E2E8F0] rounded-xl p-6 space-y-6">
         <div className="space-y-2 max-w-3xl">
           <h2 className="text-xl font-bold text-[#0F172A]">
-            Metodología de Pullbacks sobre SMA 50 y SMA 200
+            Metodología Cuantitativa de Pullbacks sobre SMA 50 y SMA 200
           </h2>
           <p className="text-sm text-[#475569] leading-relaxed">
             El sistema detecta retrocesos técnicos hacia soportes dinámicos institucionales
-            (Media Móvil Simple de 50 periodos y Media Móvil Simple de 200 periodos) en tres
-            universos completos: IBEX 35, DAX 40 y S&amp;P 500.
+            (Media Móvil Simple de 50 periodos y Media Móvil Simple de 200 periodos) sobre
+            un repositorio unificado (<span className="font-mono">data/tickers.json</span>)
+            con 580 activos oficiales (IBEX 35, DAX 40, S&amp;P 500), Europa Combinado y
+            Watchlist personalizada.
           </p>
         </div>
 
@@ -40,59 +42,87 @@ export function MethodologyView() {
           </div>
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+          <div className="border border-[#E2E8F0] rounded-xl p-4 space-y-1.5">
+            <h4 className="text-xs font-bold text-[#0F172A]">RSI (14) &amp; Golden Cross</h4>
+            <p className="text-xs text-[#475569] leading-relaxed">
+              Calcula el RSI suavizado de Wilder (14 periodos) y la condición estructural{' '}
+              <span className="font-mono">SMA 50 &gt; SMA 200</span> sin llamadas adicionales de red,
+              permitiendo filtrar retrocesos sanos en zona 35–55.
+            </p>
+          </div>
+
+          <div className="border border-[#E2E8F0] rounded-xl p-4 space-y-1.5">
+            <h4 className="text-xs font-bold text-[#0F172A]">Distancia Normalizada ATR (14)</h4>
+            <p className="text-xs text-[#475569] leading-relaxed">
+              Mide <span className="font-mono">(Cierre - SMA) / ATR(14)</span> para comparar de
+              forma homogénea valores defensivos de baja volatilidad frente a valores tecnológicos.
+            </p>
+          </div>
+
+          <div className="border border-[#E2E8F0] rounded-xl p-4 space-y-1.5">
+            <h4 className="text-xs font-bold text-[#0F172A]">Backtest Rápido Histórico</h4>
+            <p className="text-xs text-[#475569] leading-relaxed">
+              Evalúa sobre la propia serie descargada (2 años diarios o 5 años semanales) cuántos
+              rebotes previos cumplió la acción en SMA 50/200 y su rentabilidad media a +5 y +10 velas.
+            </p>
+          </div>
+        </div>
+
         <div className="border-t border-[#E2E8F0] pt-5 space-y-4">
           <h3 className="text-sm font-bold text-[#0F172A]">
-            Plan de Construcción en 4 Fases
+            Arquitectura Dual &amp; Calidad Continua (GitHub CI/CD)
           </h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
             <div className="border border-[#E2E8F0] bg-white rounded-lg p-4 space-y-1.5">
               <span className="font-semibold text-[#15803D] block">
-                Fase 1 · Completada
+                SSOT · data/tickers.json
               </span>
               <p className="font-semibold text-[#0F172A]">
-                Estructura GitHub, Datos Maestros e Interfaz
+                Fuente Única de Verdad
               </p>
               <p className="text-[#475569] leading-relaxed">
-                Tipado estricto TypeScript, 580 tickers oficiales e interfaz corporativa modular.
+                Los 580 tickers oficiales son compartidos por TypeScript y Python sin duplicidad.
               </p>
             </div>
 
             <div className="border border-[#E2E8F0] bg-white rounded-lg p-4 space-y-1.5">
               <span className="font-semibold text-[#15803D] block">
-                Fase 2 · Completada
+                Frontend Estático
               </span>
               <p className="font-semibold text-[#0F172A]">
-                Conector Real Yahoo Finance
+                Vite + React + Chart OHLC
               </p>
               <p className="text-[#475569] leading-relaxed">
-                Descarga asíncrona por lotes con proxies CORS en cascada y cancelación en{' '}
-                <span className="font-mono">yahooService.ts</span>.
+                Gráfico SVG interactivo, Watchlist en <span className="font-mono">localStorage</span>{' '}
+                y <span className="font-mono">base: &apos;./&apos;</span>.
               </p>
             </div>
 
             <div className="border border-[#E2E8F0] bg-white rounded-lg p-4 space-y-1.5">
               <span className="font-semibold text-[#15803D] block">
-                Fase 3 · Completada
+                Backend Streamlit
               </span>
               <p className="font-semibold text-[#0F172A]">
-                Motor Matemático SMA &amp; Caché Map
+                app.py + yf.download
               </p>
               <p className="text-[#475569] leading-relaxed">
-                Cálculo SMA 50/200 de últimas 15 velas, Modo A/B y caché{' '}
-                <span className="font-mono">Map</span> con TTL de 5 min.
+                Descarga vectorizada por bloques + respaldo <span className="font-mono">query1/query2</span>{' '}
+                y gráfico Plotly.
               </p>
             </div>
 
             <div className="border border-[#BFDBFE] bg-[#EFF6FF] rounded-lg p-4 space-y-1.5">
               <span className="font-semibold text-[#1D4ED8] block">
-                Fase 4 · Completada
+                GitHub Actions CI
               </span>
               <p className="font-semibold text-[#0F172A]">
-                Refinamiento UX, Exportación &amp; GitHub
+                Validación Automática
               </p>
               <p className="text-[#475569] leading-relaxed">
-                Micro-barras de distancia, insignias 50/200/Confluencia, TradingView, Excel ES y{' '}
-                <span className="font-mono">base: &apos;./&apos;</span>.
+                Verifica <span className="font-mono">tsc --noEmit</span>,{' '}
+                <span className="font-mono">npm run build</span>, paridad matemática y{' '}
+                <span className="font-mono">py_compile</span>.
               </p>
             </div>
           </div>

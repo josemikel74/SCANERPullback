@@ -3,7 +3,7 @@
  * Diseñado para garantizar compatibilidad total con `tsc --noEmit` en pipelines CI/CD.
  */
 
-export type MarketId = 'IBEX35' | 'DAX' | 'SP500';
+export type MarketId = 'IBEX35' | 'DAX' | 'SP500' | 'EUROPE' | 'WATCHLIST';
 
 export type Timeframe = '1h' | '4h' | '1d' | '1w';
 
@@ -19,6 +19,12 @@ export type ScanStatus = 'IDLE' | 'SCANNING' | 'STOPPED' | 'COMPLETED';
 
 export type ActiveViewTab = 'SCANNER' | 'UNIVERSE' | 'METHODOLOGY';
 
+export type RsiFilterMode = 'ALL' | 'UNDER_55' | 'ZONE_35_55';
+
+export type MinVolumeFilter = 0 | 1.2 | 1.5 | 2.0;
+
+export type MaxAtrDistanceFilter = 0 | 0.5 | 1.0 | 1.5;
+
 export type SortColumn =
   | 'minSmaDistance'
   | 'ticker'
@@ -26,6 +32,8 @@ export type SortColumn =
   | 'changePct'
   | 'distanceSma50Pct'
   | 'distanceSma200Pct'
+  | 'rsi14'
+  | 'atrDistance'
   | 'volumeRatio';
 
 export type SortDirection = 'asc' | 'desc';
@@ -49,7 +57,7 @@ export interface MarketMetadata {
   label: string;
   shortLabel: string;
   country: string;
-  currency: 'EUR' | 'USD';
+  currency: 'EUR' | 'USD' | 'MIXED';
   currencySymbol: '€' | '$';
   suffix: string;
   totalExpected: number;
@@ -76,6 +84,20 @@ export interface SmaDiagnostics {
   distancePct: number | null;
 }
 
+export interface BacktestSmaSummary {
+  eventsCount: number;
+  winRate5Pct: number | null;
+  avgReturn5Pct: number | null;
+  winRate10Pct: number | null;
+  avgReturn10Pct: number | null;
+}
+
+export interface PullbackBacktestStats {
+  evaluatedBars: number;
+  sma50: BacktestSmaSummary;
+  sma200: BacktestSmaSummary;
+}
+
 export interface StockAnalysisResult {
   ticker: string;
   name: string;
@@ -100,6 +122,13 @@ export interface StockAnalysisResult {
   isBounceMatch200: boolean;
   diagnostics50: SmaDiagnostics;
   diagnostics200: SmaDiagnostics;
+  rsi14: number | null;
+  atr14: number | null;
+  atrDistance50: number | null;
+  atrDistance200: number | null;
+  isGoldenCross: boolean;
+  backtest: PullbackBacktestStats;
+  candles: OHLCVCandle[];
   trend: TrendDirection;
   volumeRatio: number;
   candlesCount: number;
@@ -164,4 +193,10 @@ export interface SmaEvaluationOutput {
   bounceMatch200: boolean;
   diagnostics50: SmaDiagnostics;
   diagnostics200: SmaDiagnostics;
+  rsi14: number | null;
+  atr14: number | null;
+  atrDistance50: number | null;
+  atrDistance200: number | null;
+  isGoldenCross: boolean;
+  backtest: PullbackBacktestStats;
 }

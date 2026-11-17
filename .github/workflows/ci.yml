@@ -1,0 +1,82 @@
+name: CI · Monitor Pullback SMA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  frontend-vite-ts:
+    name: Build TypeScript & Vite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificación de tipos TypeScript (tsc --noEmit)
+        run: npm run lint
+
+      - name: Build de producción Vite (base ./)
+        run: npm run build
+
+      - name: Verificar rutas relativas en dist/index.html
+        run: grep -q './assets/' dist/index.html
+
+  python-streamlit:
+    name: Validación Python, SSOT & Motor Matemático
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Compilar módulos Python (py_compile)
+        run: python -m py_compile app.py streamlit_core/__init__.py streamlit_core/tickers_data.py streamlit_core/yahoo_service.py streamlit_core/indicators.py
+
+      - name: Validar Fuente Única de Verdad (data/tickers.json) y motor matemático
+        run: |
+          python - << 'EOF'
+          from streamlit_core.tickers_data import IBEX_35_TICKERS, DAX_40_TICKERS, SP500_TICKERS, EUROPE_TICKERS
+          from streamlit_core.indicators import evaluate_pullback_signals
+          from streamlit_core.yahoo_service import aggregate_hourly_to_4h
+
+          assert len(IBEX_35_TICKERS) == 35
+          assert len(DAX_40_TICKERS) == 40
+          assert len(SP500_TICKERS) == 505
+          assert len(EUROPE_TICKERS) == 75
+
+          # Serie sintética alcista con toque y rebote en SMA 50/200
+          candles = []
+          for i in range(250):
+              base = 100.0 + i * 0.25
+              candles.append({
+                  "timestamp": 1700000000000 + i * 86400000,
+                  "open": base,
+                  "high": base + 1.5,
+                  "low": base - 1.0,
+                  "close": base + 0.5,
+                  "volume": 100000.0,
+              })
+          res = evaluate_pullback_signals(candles, proximity_threshold_pct=1.5)
+          assert res.valid_candles_count == 250
+          assert res.sma_50 is not None and res.sma_200 is not None
+          assert res.is_golden_cross is True
+          assert res.rsi_14 is not None and 0.0 <= res.rsi_14 <= 100.0
+          assert res.atr_14 is not None and res.atr_14 > 0.0
+          assert len(aggregate_hourly_to_4h(candles[:8])) == 2
+          print("CI Python checks OK: 580 tickers, SMA/RSI/ATR/GoldenCross/4h verified.")
+          EOF

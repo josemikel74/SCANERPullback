@@ -8,6 +8,8 @@ SMA_SHORT_PERIOD = 50
 SMA_LONG_PERIOD = 200
 SMA_HISTORY_LOOKBACK = 15
 BOUNCE_TOUCH_TOLERANCE = 1.002
+RSI_DEFAULT_PERIOD = 14
+ATR_DEFAULT_PERIOD = 14
 
 
 @dataclass
@@ -33,6 +35,22 @@ class SmaDiagnostics:
 
 
 @dataclass
+class BacktestSmaSummary:
+    events_count: int
+    win_rate_5_pct: Optional[float]
+    avg_return_5_pct: Optional[float]
+    win_rate_10_pct: Optional[float]
+    avg_return_10_pct: Optional[float]
+
+
+@dataclass
+class PullbackBacktestStats:
+    evaluated_bars: int
+    sma_50: BacktestSmaSummary
+    sma_200: BacktestSmaSummary
+
+
+@dataclass
 class SmaEvaluation:
     valid_candles_count: int
     sma_50: Optional[float]
@@ -45,6 +63,12 @@ class SmaEvaluation:
     bounce_match_200: bool
     diagnostics_50: SmaDiagnostics
     diagnostics_200: SmaDiagnostics
+    rsi_14: Optional[float]
+    atr_14: Optional[float]
+    atr_distance_50: Optional[float]
+    atr_distance_200: Optional[float]
+    is_golden_cross: bool
+    backtest: PullbackBacktestStats
 
 
 def _is_valid_pos(val: Any) -> bool:
@@ -94,11 +118,178 @@ def calculate_sma_at_offset(closes: List[float], period: int, offset_from_end: i
     return sum(window) / period
 
 
+def calculate_sma_series(closes: List[float], period: int) -> List[Optional[float]]:
+    """Calcula la serie O(n) de SMA usando suma móvil."""
+    n = len(closes)
+    result: List[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return result
+
+    rolling_sum = 0.0
+    for i, val in enumerate(closes):
+        rolling_sum += val
+        if i >= period:
+            rolling_sum -= closes[i - period]
+        if i >= period - 1:
+            result[i] = rolling_sum / period
+    return result
+
+
 def calculate_sma_last_candles(
     closes: List[float], period: int, lookback: int = SMA_HISTORY_LOOKBACK
 ) -> List[Optional[float]]:
     """Calcula la SMA actual y la de las últimas `lookback` velas."""
     return [calculate_sma_at_offset(closes, period, offset) for offset in range(lookback + 1)]
+
+
+def calculate_rsi_14(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> Optional[float]:
+    """Calcula el RSI (14) suavizado de Wilder."""
+    n = len(closes)
+    if period <= 0 or n <= period:
+        return None
+
+    gain_sum = 0.0
+    loss_sum = 0.0
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gain_sum += diff
+        else:
+            loss_sum += abs(diff)
+
+    avg_gain = gain_sum / period
+    avg_loss = loss_sum / period
+
+    for i in range(period + 1, n):
+        diff = closes[i] - closes[i - 1]
+        gain = diff if diff > 0 else 0.0
+        loss = abs(diff) if diff < 0 else 0.0
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def calculate_atr_14(valid_candles: List[Candle], period: int = ATR_DEFAULT_PERIOD) -> Optional[float]:
+    """Calcula el ATR (14) suavizado de Wilder sobre velas válidas."""
+    n = len(valid_candles)
+    if period <= 0 or n <= period:
+        return None
+
+    true_ranges: List[float] = [0.0] * n
+    true_ranges[0] = valid_candles[0].high - valid_candles[0].low
+    for i in range(1, n):
+        cur = valid_candles[i]
+        prev_close = valid_candles[i - 1].close
+        true_ranges[i] = max(
+            cur.high - cur.low,
+            abs(cur.high - prev_close),
+            abs(cur.low - prev_close),
+        )
+
+    atr = sum(true_ranges[1 : period + 1]) / period
+    for i in range(period + 1, n):
+        atr = (atr * (period - 1) + true_ranges[i]) / period
+
+    return atr if math.isfinite(atr) and atr > 0 else None
+
+
+def _empty_backtest_summary() -> BacktestSmaSummary:
+    return BacktestSmaSummary(
+        events_count=0,
+        win_rate_5_pct=None,
+        avg_return_5_pct=None,
+        win_rate_10_pct=None,
+        avg_return_10_pct=None,
+    )
+
+
+def _backtest_single_sma(
+    valid_candles: List[Candle], closes: List[float], period: int
+) -> BacktestSmaSummary:
+    n = len(valid_candles)
+    min_index = period + SMA_HISTORY_LOOKBACK
+    max_index = n - 11
+    if max_index < min_index:
+        return _empty_backtest_summary()
+
+    sma_series = calculate_sma_series(closes, period)
+    returns_5: List[float] = []
+    returns_10: List[float] = []
+    last_signal_index = -100
+
+    for i in range(min_index, max_index + 1):
+        if i - last_signal_index < 5:
+            continue
+
+        sma_cur = sma_series[i]
+        sma_prev = sma_series[i - 1]
+        if sma_cur is None or sma_cur <= 0 or sma_prev is None or sma_prev <= 0:
+            continue
+
+        checked = 0
+        above_count = 0
+        for offset in range(5, 16):
+            idx = i - offset
+            sma_at_offset = sma_series[idx]
+            if idx >= 0 and sma_at_offset is not None and sma_at_offset > 0:
+                checked += 1
+                if valid_candles[idx].close > sma_at_offset:
+                    above_count += 1
+
+        if checked == 0 or above_count < math.ceil(checked * 0.6):
+            continue
+
+        cur = valid_candles[i]
+        prev = valid_candles[i - 1]
+        touched = (
+            cur.low <= sma_cur * BOUNCE_TOUCH_TOLERANCE
+            or prev.low <= sma_prev * BOUNCE_TOUCH_TOLERANCE
+        )
+        if not touched or cur.close <= sma_cur:
+            continue
+
+        ret_5 = ((valid_candles[i + 5].close - cur.close) / cur.close) * 100.0
+        ret_10 = ((valid_candles[i + 10].close - cur.close) / cur.close) * 100.0
+        returns_5.append(ret_5)
+        returns_10.append(ret_10)
+        last_signal_index = i
+
+    if not returns_5:
+        return _empty_backtest_summary()
+
+    wins_5 = sum(1 for r in returns_5 if r > 0)
+    wins_10 = sum(1 for r in returns_10 if r > 0)
+    count = len(returns_5)
+    return BacktestSmaSummary(
+        events_count=count,
+        win_rate_5_pct=(wins_5 / count) * 100.0,
+        avg_return_5_pct=sum(returns_5) / count,
+        win_rate_10_pct=(wins_10 / count) * 100.0,
+        avg_return_10_pct=sum(returns_10) / count,
+    )
+
+
+def run_pullback_backtest(
+    valid_candles: List[Candle],
+    short_period: int = SMA_SHORT_PERIOD,
+    long_period: int = SMA_LONG_PERIOD,
+) -> PullbackBacktestStats:
+    if len(valid_candles) < short_period + SMA_HISTORY_LOOKBACK + 11:
+        return PullbackBacktestStats(
+            evaluated_bars=len(valid_candles),
+            sma_50=_empty_backtest_summary(),
+            sma_200=_empty_backtest_summary(),
+        )
+    closes = [c.close for c in valid_candles]
+    return PullbackBacktestStats(
+        evaluated_bars=len(valid_candles),
+        sma_50=_backtest_single_sma(valid_candles, closes, short_period),
+        sma_200=_backtest_single_sma(valid_candles, closes, long_period),
+    )
 
 
 def _empty_diagnostics() -> SmaDiagnostics:
@@ -135,10 +326,8 @@ def _evaluate_single_sma(
     prev_candle = valid_candles[n - 2] if n >= 2 else None
     current_close = current_candle.close
 
-    # Pendiente positiva o neutra-alcista: SMA actual >= SMA hace 10 velas
     slope_ok = sma_10_ago is not None and sma_current >= sma_10_ago
 
-    # Contexto previo: precio hace 5-15 velas cotizaba por encima de dicha media
     checked_offsets = 0
     above_count = 0
     for offset in range(5, 16):
@@ -151,18 +340,15 @@ def _evaluate_single_sma(
 
     was_above_5_15 = checked_offsets > 0 and above_count >= math.ceil(checked_offsets * 0.6)
 
-    # Distancia porcentual actual
     distance_pct = ((current_close - sma_current) / sma_current) * 100.0
     abs_threshold = abs(proximity_threshold_pct)
 
-    # Modo A — Zona de Proximidad
     proximity_match = (
         slope_ok
         and was_above_5_15
         and -abs_threshold <= distance_pct <= abs_threshold
     )
 
-    # Modo B — Toque y Rebote Estricto
     sma_prev = sma_last_16[1] if len(sma_last_16) > 1 and sma_last_16[1] is not None else sma_current
     touched_current = current_candle.low <= sma_current * BOUNCE_TOUCH_TOLERANCE
     touched_prev = prev_candle is not None and prev_candle.low <= sma_prev * BOUNCE_TOUCH_TOLERANCE
@@ -190,7 +376,7 @@ def evaluate_pullback_signals(
     short_period: int = SMA_SHORT_PERIOD,
     long_period: int = SMA_LONG_PERIOD,
 ) -> SmaEvaluation:
-    """Evalúa limpiado OHLC, SMA 50/200 y estrategias Modo A y Modo B."""
+    """Evalúa limpiado OHLC, SMA 50/200, RSI(14), ATR(14), Golden Cross y Backtest rápido."""
     valid_candles = sanitize_candles(raw_candles)
     if not valid_candles:
         empty = _empty_diagnostics()
@@ -206,9 +392,20 @@ def evaluate_pullback_signals(
             bounce_match_200=False,
             diagnostics_50=empty,
             diagnostics_200=empty,
+            rsi_14=None,
+            atr_14=None,
+            atr_distance_50=None,
+            atr_distance_200=None,
+            is_golden_cross=False,
+            backtest=PullbackBacktestStats(
+                evaluated_bars=0,
+                sma_50=_empty_backtest_summary(),
+                sma_200=_empty_backtest_summary(),
+            ),
         )
 
     closes = [c.close for c in valid_candles]
+    current_close = closes[-1]
     diag_50, prox_50, bounce_50 = _evaluate_single_sma(
         valid_candles, closes, short_period, proximity_threshold_pct
     )
@@ -216,10 +413,20 @@ def evaluate_pullback_signals(
         valid_candles, closes, long_period, proximity_threshold_pct
     )
 
+    rsi_14 = calculate_rsi_14(closes, RSI_DEFAULT_PERIOD)
+    atr_14 = calculate_atr_14(valid_candles, ATR_DEFAULT_PERIOD)
+
+    sma_50 = diag_50.sma_current
+    sma_200 = diag_200.sma_current
+    atr_dist_50 = (current_close - sma_50) / atr_14 if (atr_14 and atr_14 > 0 and sma_50 is not None) else None
+    atr_dist_200 = (current_close - sma_200) / atr_14 if (atr_14 and atr_14 > 0 and sma_200 is not None) else None
+    is_golden_cross = sma_50 is not None and sma_200 is not None and sma_50 > sma_200
+    backtest = run_pullback_backtest(valid_candles, short_period, long_period)
+
     return SmaEvaluation(
         valid_candles_count=len(valid_candles),
-        sma_50=diag_50.sma_current,
-        sma_200=diag_200.sma_current,
+        sma_50=sma_50,
+        sma_200=sma_200,
         distance_sma_50_pct=diag_50.distance_pct,
         distance_sma_200_pct=diag_200.distance_pct,
         proximity_match_50=prox_50,
@@ -228,4 +435,10 @@ def evaluate_pullback_signals(
         bounce_match_200=bounce_200,
         diagnostics_50=diag_50,
         diagnostics_200=diag_200,
+        rsi_14=rsi_14,
+        atr_14=atr_14,
+        atr_distance_50=atr_dist_50,
+        atr_distance_200=atr_dist_200,
+        is_golden_cross=is_golden_cross,
+        backtest=backtest,
     )

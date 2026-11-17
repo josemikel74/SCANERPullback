@@ -1,125 +1,99 @@
 # Monitor Pullback SMA — IBEX 35, DAX 40 y S&P 500
 
-Sistema profesional de monitorización bursátil en tiempo real construido con **React 19**, **TypeScript**, **Vite** y **Tailwind CSS v4** para detectar oportunidades de *pullback* hacia las medias móviles simples **SMA 50** y **SMA 200** en los índices **IBEX 35**, **DAX 40** y **S&P 500** (580 valores oficiales completos).
+Aplicación financiera profesional en español para monitorizar acciones en tiempo real y detectar **pullbacks hacia las medias móviles simples SMA 50 y SMA 200** en los índices **IBEX 35**, **DAX 40**, **S&P 500**, el universo combinado **Europa (75)** y **Watchlists personalizadas**.
+
+El repositorio es **100% dual-compatible**:
+1. **Frontend Estático Profesional (Vite + React 19 + TypeScript + Tailwind CSS v4)** preparado para **GitHub Pages**, **Vercel** o **Netlify** (`base: './'`).
+2. **Aplicación Python / Streamlit (`app.py`)** lista para **Streamlit Community Cloud** con descarga vectorizada mediante `yfinance` (`yf.download(..., threads=True)`), gráfico interactivo **Plotly** y respaldo automático contra `query1` / `query2`.
 
 ---
 
 ## Características Principales
 
-- **Universo Completo sin Recortes**:
-  - **IBEX 35** (35 valores `.MC`)
-  - **DAX 40** (40 valores `.DE`)
-  - **S&P 500** (505 valores NYSE / NASDAQ)
-- **Datos Reales desde Yahoo Finance v8**:
-  - Mapeo inteligente de temporalidades: `1d` (`2y`), `1w` (`5y`), `1h` (`60d`) y `4h` (`60m` / `180d` agregadas determinísticamente en bloques de 4 velas).
-  - Cascada anti-bloqueo CORS con rotación automática de proxies públicos y *timeout* de `8000 ms`, sin necesidad de claves API ni variables de entorno privadas.
-  - Procesamiento por lotes de 6 peticiones simultáneas cada `300 ms` con cancelación instantánea mediante `AbortController`.
-- **Motor Matemático y Caché en Memoria (<10 ms)**:
-  - Limpieza de velas nulas/incompletas y validación estricta de profundidad (`≥ 50` velas para SMA 50 y `≥ 200` velas para SMA 200).
-  - **Modo A — Zona de Proximidad (±%)**: exige pendiente alcista/neutra (`SMA actual >= SMA hace 10 velas`), cotización previa sobre la media hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]` (por defecto `±1.5%`).
-  - **Modo B — Toque y Rebote Estricto**: exige mínimo reciente sobre o bajo la media (`Low <= SMA * 1.002`) viniendo de cotizar por encima hace 5–15 velas, con cierre actual estrictamente superior (`Close > SMA`).
-  - Caché en memoria `Map` indexado por `${mercado}_${temporalidad}` con **TTL de 5 minutos** para alternar estrategias y umbrales instantáneamente.
-- **UX Corporativa, Auditoría y Exportación**:
-  - Columna de distancia porcentual con código cromático semántico (esmeralda encima / ámbar debajo) y **micro-barra visual centrada en 0.00%**.
-  - Insignias diferenciadas para **SMA 50** (azul), **SMA 200** (índigo) y **Confluencia 50 + 200** (dorado).
-  - Enlace directo en cada ticker hacia Yahoo Finance (`https://finance.yahoo.com/quote/{TICKER}`) y panel auditor de fórmulas al hacer clic en cualquier fila.
-  - Panel desplegable de control anti-errores con tickers omitidos por historial insuficiente (`< 200` velas) o error de red.
-  - **Exportar CSV** compatible con Excel en español (BOM UTF-8, separador `;` y decimales con coma) y **Copiar Tickers** en formato TradingView (`BME:`, `XETR:`, etc.).
+- **Fuente Única de Verdad (`data/tickers.json`)**: Los **580 valores oficiales** (35 del IBEX 35 con `.MC`, 40 del DAX 40 con `.DE` y 505 del S&P 500) son compartidos exactamente entre TypeScript y Python, incluyendo soporte para **Europa (75)** y **Watchlist personalizada** (`localStorage` + importación/exportación JSON/TXT y formato TradingView `BME:`/`XETR:`).
+- **Gráfico Interactivo OHLC + SMA 50 / SMA 200**: Visualizador SVG responsivo sin dependencias externas en React (y Plotly en Streamlit) con banda sombreada `±umbral%`, volumen inferior y tooltip *crosshair* con **RSI (14)**.
+- **Filtros Técnicos Avanzados (en memoria, sin peticiones extra)**:
+  - **Golden Cross**: Filtra valores con `SMA 50 > SMA 200`.
+  - **RSI (14)** suavizado de Wilder: Filtro rápido `< 55` o zona pullback `35–55`.
+  - **ATR (14)** de Wilder y **Distancia Normalizada en ATR** `(Cierre - SMA) / ATR(14)`.
+  - **Volumen Relativo mínimo** sobre media de 20 velas (`≥ 1,2x`, `≥ 1,5x`, `≥ 2,0x`).
+- **Backtest Histórico Rápido**: Evalúa sobre la serie histórica descargada (`2y` diaria o `5y` semanal) los rebotes previos en SMA 50 y SMA 200, calculando tasa de acierto y retorno medio a `+5` y `+10` velas.
+- **Doble Estrategia en Tiempo Real (<10 ms)**:
+  - **Modo A — Zona de Proximidad (`±%`)**: Tendencia alcista/neutra en SMA, precio previo por encima hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]`.
+  - **Modo B — Toque y Rebote Estricto**: Mínimo de la vela actual o anterior `≤ SMA × 1.002` con cierre actual estrictamente superior a la media (`Close > SMA`).
+- **Control Anti-Errores, Caché TTL 5 min y Exportación**:
+  - Cancelación instantánea con `AbortController`, descarga por lotes controlados (`6` tickers cada `300 ms` en navegador / `yf.download` vectorizado en Streamlit), micro-barras centradas en `0.00%`, enlaces directos a Yahoo Finance, **Exportar CSV** (Excel regional español UTF-8 BOM + `;`) y **Copiar Tickers** para TradingView.
+- **Pipeline GitHub Actions (`.github/workflows/ci.yml`)**: Valida `tsc --noEmit`, `npm run build`, `py_compile`, paridad matemática y conteo de `data/tickers.json` en cada *push* o *pull request*.
 
 ---
 
-## Arquitectura del Repositorio
+## Estructura del Repositorio
 
 ```text
-├── app.py                               # Aplicación Streamlit lista para Streamlit Community Cloud
-├── requirements.txt                     # Dependencias Python (streamlit, pandas, requests)
+├── .github/workflows/
+│   └── ci.yml                  # CI/CD: TypeScript, Vite, Python py_compile y SSOT
 ├── .streamlit/
-│   └── config.toml                      # Configuración y tema corporativo claro de Streamlit
+│   └── config.toml             # Tema corporativo Modo Claro para Streamlit
+├── data/
+│   └── tickers.json            # Fuente Única de Verdad (35 IBEX + 40 DAX + 505 S&P 500)
+├── app.py                      # Aplicación principal compatible con Streamlit Cloud
+├── requirements.txt            # Dependencias Python (streamlit, pandas, requests, yfinance, plotly)
 ├── streamlit_core/
-│   ├── tickers_data.py                  # Listados maestros Python (IBEX 35, DAX 40, S&P 500)
-│   ├── yahoo_service.py                 # Conector Python Yahoo Finance v8 con lotes y agregación 4h
-│   └── indicators.py                    # Motor matemático Python SMA 50/200 y estrategias Modo A/B
-├── index.html                           # Metadatos SEO y tipografía tabular (Plus Jakarta Sans / JetBrains Mono)
-├── package.json                         # Dependencias estándar (react, react-dom, lucide-react, tailwindcss)
-├── tsconfig.json                        # Configuración TypeScript estricta (strict + noUnusedLocals)
-├── vite.config.ts                       # Configurado con base: './' para dominio raíz o subrutas de GitHub Pages
-└── src/
-    ├── types/
-    │   └── market.ts                    # Interfaces estrictas para mercados, velas, diagnósticos y caché
-    ├── data/
-    │   └── tickersData.ts               # Listados maestros completos (IBEX 35, DAX 40, S&P 500)
-    ├── services/
-    │   ├── yahooService.ts              # Conector Yahoo Finance v8, proxies CORS en cascada y AbortController
-    │   └── marketCache.ts               # Caché en memoria Map por ${mercado}_${temporalidad} (TTL 5 min)
-    ├── utils/
-    │   └── indicators.ts                # Limpieza OHLC, cálculo SMA 50/200 y evaluación Modo A / Modo B
-    ├── components/
-    │   ├── TopBar.tsx                   # Barra superior corporativa
-    │   ├── ScannerControls.tsx          # Controles de mercado, temporalidad, estrategia y filtros
-    │   ├── ResultsTable.tsx             # Tabla ordenable, micro-barras 0.00%, insignias y exportación
-    │   ├── StockDetailDrawer.tsx        # Auditoría matemática detallada por valor
-    │   ├── OmittedTickersPanel.tsx      # Panel desplegable de tickers omitidos o incidencias
-    │   ├── UniverseView.tsx             # Directorio completo buscable de los 580 valores
-    │   └── MethodologyView.tsx          # Documentación de fórmulas y arquitectura
-    ├── App.tsx                          # Estado principal y orquestación
-    ├── main.tsx                         # Punto de entrada React
-    └── index.css                        # Estilos globales Tailwind CSS v4
+│   ├── __init__.py
+│   ├── tickers_data.py         # Cargador SSOT desde data/tickers.json + Europa/Watchlist
+│   ├── yahoo_service.py        # yf.download vectorizado + fallback query1/query2 y velas 4h
+│   └── indicators.py           # SMA 50/200, RSI(14), ATR(14), Golden Cross y Backtest rápido
+├── src/
+│   ├── components/
+│   │   ├── CandlestickChart.tsx    # Gráfico OHLC SVG interactivo + SMA 50/200 + banda ±%
+│   │   ├── MethodologyView.tsx
+│   │   ├── OmittedTickersPanel.tsx
+│   │   ├── ResultsTable.tsx        # Tabla ordenable, estrella Watchlist, RSI, Dist. ATR y micro-barras
+│   │   ├── ScannerControls.tsx     # Selectores de mercado, filtros avanzados y gestor Watchlist
+│   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, gráfico OHLC y Backtest rápido
+│   │   ├── TopBar.tsx
+│   │   └── UniverseView.tsx
+│   ├── data/tickersData.ts     # Cargador SSOT desde data/tickers.json
+│   ├── services/
+│   │   ├── marketCache.ts      # Caché Map `${mercado}_${temporalidad}` (TTL 5 min)
+│   │   ├── watchlistService.ts # Persistencia Watchlist en localStorage + JSON/TXT
+│   │   └── yahooService.ts     # Conector Yahoo Finance con proxies CORS en cascada
+│   ├── types/market.ts
+│   ├── utils/indicators.ts     # Motor matemático TS (SMA, RSI 14, ATR 14, Backtest rápido)
+│   └── App.tsx
+├── package.json
+├── tsconfig.json
+└── vite.config.ts              # base: './' para subrutas GitHub Pages
 ```
 
 ---
 
-## Ejecución en Streamlit (Local y Streamlit Community Cloud)
+## Instalación y Uso Local
 
-Requisitos previos: **Python 3.10+**.
-
-```bash
-# 1. Instalar dependencias de Python
-pip install -r requirements.txt
-
-# 2. Ejecutar la aplicación Streamlit
-streamlit run app.py
-```
-
-Para desplegar en **Streamlit Community Cloud**:
-1. Sube este repositorio a GitHub.
-2. En [share.streamlit.io](https://share.streamlit.io/), selecciona el repositorio, la rama principal y especifica `app.py` como archivo de entrada (*Main file path*).
-
----
-
-## Ejecución Frontend Estático (Vite + React + TypeScript)
-
-Requisitos previos: **Node.js 20+** y **npm 10+**.
+### Opción 1: Frontend React + Vite + TypeScript
 
 ```bash
-# 1. Clonar el repositorio
-git clone https://github.com/tu-usuario/monitor-pullbacks-sma.git
-cd monitor-pullbacks-sma
-
-# 2. Instalar dependencias
 npm install
-
-# 3. Iniciar servidor de desarrollo
 npm run dev
 ```
 
-### Verificación de Tipos y Compilación
+Compilación y verificación de tipos:
 
 ```bash
-# Comprobar tipos TypeScript en modo estricto
 npm run lint
-
-# Compilar artefacto estático para producción en dist/
 npm run build
+```
 
-# Previsualizar el build de producción
-npm run preview
+### Opción 2: Aplicación Python + Streamlit
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
 ---
 
-## Despliegue en GitHub Pages, Vercel o Netlify
+## Despliegue para GitHub
 
-El archivo `vite.config.ts` incluye `base: './'`, por lo que el directorio generado `dist/` funciona de forma autónoma tanto en dominios raíz como en subrutas de proyecto (`https://usuario.github.io/nombre-repo/`):
-
-- **GitHub Pages**: Publica el contenido de `dist/` tras ejecutar `npm run build` (por ejemplo, con GitHub Actions `actions/upload-pages-artifact`).
-- **Vercel / Netlify**: Conecta el repositorio con comando `npm run build` y directorio de salida `dist`.
+- **GitHub Pages / Vercel / Netlify (Estático)**: Configurado con `base: './'` en `vite.config.ts`. Ejecuta `npm run build` y publica la carpeta `dist/`. No requiere claves API ni variables de entorno privadas.
+- **Streamlit Community Cloud**: Selecciona el repositorio y apunta el archivo principal a `app.py` (las dependencias de `requirements.txt` se instalan automáticamente).

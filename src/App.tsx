@@ -6,17 +6,31 @@ import { ScannerControls } from './components/ScannerControls';
 import { StockDetailDrawer } from './components/StockDetailDrawer';
 import { TopBar } from './components/TopBar';
 import { UniverseView } from './components/UniverseView';
-import { MARKETS_METADATA, getTickersByMarket } from './data/tickersData';
 import {
+  MARKETS_METADATA,
+  getTickersByMarket,
+  inferTickerCurrencySymbol,
+} from './data/tickersData';
+import {
+  clearMarketCache,
   getCachedMarketEntry,
   setCachedMarketEntry,
 } from './services/marketCache';
+import {
+  deduplicateTickers,
+  loadWatchlistTickers,
+  saveWatchlistTickers,
+  toggleWatchlistTicker,
+} from './services/watchlistService';
 import { fetchMarketBatch } from './services/yahooService';
 import type {
   ActiveViewTab,
   MarketId,
+  MaxAtrDistanceFilter,
+  MinVolumeFilter,
   NetworkIncident,
   OmittedTickerItem,
+  RsiFilterMode,
   ScanStatus,
   SmaFilter,
   SortColumn,
@@ -68,6 +82,24 @@ function getMinRelevantSmaDistance(
   return Math.min(d50, d200);
 }
 
+function getMinRelevantAtrDistance(
+  row: StockAnalysisResult,
+  smaFilter: SmaFilter
+): number | null {
+  if (smaFilter === 'SMA50') {
+    return row.atrDistance50 !== null ? Math.abs(row.atrDistance50) : null;
+  }
+  if (smaFilter === 'SMA200') {
+    return row.atrDistance200 !== null ? Math.abs(row.atrDistance200) : null;
+  }
+  if (row.atrDistance50 !== null && row.atrDistance200 !== null) {
+    return Math.min(Math.abs(row.atrDistance50), Math.abs(row.atrDistance200));
+  }
+  if (row.atrDistance50 !== null) return Math.abs(row.atrDistance50);
+  if (row.atrDistance200 !== null) return Math.abs(row.atrDistance200);
+  return null;
+}
+
 function mapYahooResponseToStockResult(
   yahooRes: YahooChartResponse,
   tickerInfo: TickerInfo,
@@ -83,6 +115,10 @@ function mapYahooResponseToStockResult(
       ? validCandles[validCandles.length - 2]
       : lastCandle;
   const meta = MARKETS_METADATA[market];
+  const currencySymbol = inferTickerCurrencySymbol(
+    tickerInfo.ticker,
+    meta.currencySymbol
+  );
 
   const price = lastCandle ? lastCandle.close : yahooRes.regularMarketPrice;
   const previousClose = yahooRes.previousClose || prevCandle.close;
@@ -154,7 +190,7 @@ function mapYahooResponseToStockResult(
     sector: tickerInfo.sector,
     market,
     timeframe: yahooRes.timeframe,
-    currencySymbol: meta.currencySymbol,
+    currencySymbol,
     price,
     previousClose,
     open: lastCandle.open,
@@ -172,6 +208,13 @@ function mapYahooResponseToStockResult(
     isBounceMatch200: evalOutput.bounceMatch200,
     diagnostics50: evalOutput.diagnostics50,
     diagnostics200: evalOutput.diagnostics200,
+    rsi14: evalOutput.rsi14,
+    atr14: evalOutput.atr14,
+    atrDistance50: evalOutput.atrDistance50,
+    atrDistance200: evalOutput.atrDistance200,
+    isGoldenCross: evalOutput.isGoldenCross,
+    backtest: evalOutput.backtest,
+    candles: validCandles,
     trend,
     volumeRatio,
     candlesCount: yahooRes.candles.length,
@@ -189,6 +232,11 @@ function mapYahooResponseToStockResult(
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveViewTab>('SCANNER');
 
+  // Watchlist personalizada (localStorage)
+  const [watchlistTickers, setWatchlistTickers] = useState<string[]>(() =>
+    loadWatchlistTickers()
+  );
+
   // Controles de escaneo
   const [market, setMarket] = useState<MarketId>('IBEX35');
   const [timeframe, setTimeframe] = useState<Timeframe>('1d');
@@ -196,10 +244,14 @@ export default function App() {
   const [proximityThresholdPct, setProximityThresholdPct] = useState<number>(1.5);
   const [smaFilter, setSmaFilter] = useState<SmaFilter>('ALL');
 
-  // Filtros secundarios y ordenación por defecto: menor distancia absoluta a la SMA
+  // Filtros secundarios y técnicos avanzados
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedSector, setSelectedSector] = useState<string>('ALL');
   const [showAllTickers, setShowAllTickers] = useState<boolean>(false);
+  const [onlyGoldenCross, setOnlyGoldenCross] = useState<boolean>(false);
+  const [minVolumeFilter, setMinVolumeFilter] = useState<MinVolumeFilter>(0);
+  const [rsiFilter, setRsiFilter] = useState<RsiFilterMode>('ALL');
+  const [maxAtrFilter, setMaxAtrFilter] = useState<MaxAtrDistanceFilter>(0);
   const [sortColumn, setSortColumn] = useState<SortColumn>('minSmaDistance');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -215,6 +267,11 @@ export default function App() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+
+  const watchlistSet = useMemo(
+    () => new Set(watchlistTickers),
+    [watchlistTickers]
+  );
 
   const abortActiveScan = useCallback(() => {
     if (abortControllerRef.current) {
@@ -232,10 +289,14 @@ export default function App() {
     };
   }, [abortActiveScan]);
 
+  const activeUniverse = useMemo(
+    () => getTickersByMarket(market, watchlistTickers),
+    [market, watchlistTickers]
+  );
+
   const tickerInfoMap = useMemo(() => {
-    const universe = getTickersByMarket(market);
-    return new Map<string, TickerInfo>(universe.map((t) => [t.ticker, t]));
-  }, [market]);
+    return new Map<string, TickerInfo>(activeUniverse.map((t) => [t.ticker, t]));
+  }, [activeUniverse]);
 
   // Evaluación matemática en memoria (<10 ms) sobre las series cacheadas
   const { evaluatedData, recalcMs } = useMemo(() => {
@@ -295,11 +356,10 @@ export default function App() {
 
   // Sectores disponibles del índice actual
   const availableSectors = useMemo(() => {
-    const tickers = getTickersByMarket(market);
-    return Array.from(new Set(tickers.map((t) => t.sector))).sort((a, b) =>
+    return Array.from(new Set(activeUniverse.map((t) => t.sector))).sort((a, b) =>
       a.localeCompare(b, 'es')
     );
-  }, [market]);
+  }, [activeUniverse]);
 
   // Estadísticas rápidas (KPIs) sobre los datos analizados actualmente
   const metrics = useMemo(() => {
@@ -346,6 +406,22 @@ export default function App() {
         !row.name.toLowerCase().includes(q)
       ) {
         return false;
+      }
+
+      if (onlyGoldenCross && !row.isGoldenCross) {
+        return false;
+      }
+      if (minVolumeFilter > 0 && row.volumeRatio < minVolumeFilter) {
+        return false;
+      }
+      if (rsiFilter === 'UNDER_55') {
+        if (row.rsi14 === null || row.rsi14 >= 55) return false;
+      } else if (rsiFilter === 'ZONE_35_55') {
+        if (row.rsi14 === null || row.rsi14 < 35 || row.rsi14 > 55) return false;
+      }
+      if (maxAtrFilter > 0) {
+        const atrDist = getMinRelevantAtrDistance(row, smaFilter);
+        if (atrDist === null || atrDist > maxAtrFilter) return false;
       }
 
       if (showAllTickers) {
@@ -403,6 +479,20 @@ export default function App() {
           comparison = valA - valB;
           break;
         }
+        case 'rsi14': {
+          const valA = a.rsi14 ?? Number.MAX_SAFE_INTEGER;
+          const valB = b.rsi14 ?? Number.MAX_SAFE_INTEGER;
+          comparison = valA - valB;
+          break;
+        }
+        case 'atrDistance': {
+          const valA =
+            getMinRelevantAtrDistance(a, smaFilter) ?? Number.MAX_SAFE_INTEGER;
+          const valB =
+            getMinRelevantAtrDistance(b, smaFilter) ?? Number.MAX_SAFE_INTEGER;
+          comparison = valA - valB;
+          break;
+        }
         case 'volumeRatio':
           comparison = a.volumeRatio - b.volumeRatio;
           break;
@@ -415,6 +505,10 @@ export default function App() {
     evaluatedData,
     searchQuery,
     selectedSector,
+    onlyGoldenCross,
+    minVolumeFilter,
+    rsiFilter,
+    maxAtrFilter,
     showAllTickers,
     strategy,
     smaFilter,
@@ -459,13 +553,49 @@ export default function App() {
     hydrateFromCacheOrReset(market, nextTimeframe);
   };
 
+  const handleToggleWatchlist = (ticker: string) => {
+    setWatchlistTickers((prev) => {
+      const next = toggleWatchlistTicker(prev, ticker);
+      clearMarketCache('WATCHLIST');
+      return next;
+    });
+  };
+
+  const handleAddWatchlistTickers = (tickers: string[]) => {
+    setWatchlistTickers((prev) => {
+      const next = saveWatchlistTickers(deduplicateTickers([...prev, ...tickers]));
+      clearMarketCache('WATCHLIST');
+      return next;
+    });
+  };
+
+  const handleRemoveWatchlistTicker = (ticker: string) => {
+    setWatchlistTickers((prev) => {
+      const next = saveWatchlistTickers(prev.filter((t) => t !== ticker));
+      clearMarketCache('WATCHLIST');
+      return next;
+    });
+  };
+
+  const handleReplaceWatchlist = (tickers: string[]) => {
+    const next = saveWatchlistTickers(tickers);
+    setWatchlistTickers(next);
+    clearMarketCache('WATCHLIST');
+    if (market === 'WATCHLIST') {
+      setRawResponses([]);
+      setNetworkIncidents([]);
+      setProcessedCount(0);
+      setFromCache(false);
+      setScanStatus('IDLE');
+    }
+  };
+
   const handleStartScan = async () => {
+    if (activeUniverse.length === 0) return;
     abortActiveScan();
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
-
-    const universe = getTickersByMarket(market);
 
     setSelectedTicker(null);
     setCurrentPage(1);
@@ -477,7 +607,7 @@ export default function App() {
 
     try {
       const { results, incidents, aborted } = await fetchMarketBatch(
-        universe.map((t) => t.ticker),
+        activeUniverse.map((t) => t.ticker),
         market,
         timeframe,
         (update) => {
@@ -533,6 +663,10 @@ export default function App() {
     setSelectedSector('ALL');
     setSmaFilter('ALL');
     setProximityThresholdPct(1.5);
+    setOnlyGoldenCross(false);
+    setMinVolumeFilter(0);
+    setRsiFilter('ALL');
+    setMaxAtrFilter(0);
     setShowAllTickers(false);
     setSortColumn('minSmaDistance');
     setSortDirection('asc');
@@ -560,6 +694,11 @@ export default function App() {
       'Dist. SMA 50 %',
       'SMA 200',
       'Dist. SMA 200 %',
+      'RSI 14',
+      'ATR 14',
+      'Dist. ATR SMA50',
+      'Dist. ATR SMA200',
+      'Golden Cross',
       'Volumen Relativo',
       'Velas Validas',
       'Resumen Senal',
@@ -577,6 +716,11 @@ export default function App() {
       fmtEs(r.distanceSma50Pct),
       fmtEs(r.sma200),
       fmtEs(r.distanceSma200Pct),
+      fmtEs(r.rsi14),
+      fmtEs(r.atr14),
+      fmtEs(r.atrDistance50),
+      fmtEs(r.atrDistance200),
+      r.isGoldenCross ? 'SI' : 'NO',
       fmtEs(r.volumeRatio),
       String(r.validCandlesCount),
       `"${r.signalSummary}"`,
@@ -615,7 +759,6 @@ export default function App() {
         setCopiedCount(null);
       }, 2500);
     } catch {
-      // Respaldo mediante textarea temporal si el navegador restringe navigator.clipboard
       const textarea = document.createElement('textarea');
       textarea.value = formatted;
       textarea.style.position = 'fixed';
@@ -634,7 +777,7 @@ export default function App() {
     }
   };
 
-  const totalMarketTickers = getTickersByMarket(market).length;
+  const totalMarketTickers = activeUniverse.length;
   const marketMeta = MARKETS_METADATA[market];
 
   return (
@@ -657,7 +800,7 @@ export default function App() {
                 </h1>
                 <p className="text-xs text-[#64748B]">
                   {marketMeta.label} · {marketMeta.country} · Temporalidad {timeframe} ·
-                  Haz clic en un ticker para abrir Yahoo Finance o en la fila para auditar las fórmulas
+                  Haz clic en una fila para ver gráfico OHLC, RSI/ATR y backtest histórico
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-4 text-xs text-[#64748B] font-mono tabular-nums">
@@ -721,6 +864,30 @@ export default function App() {
                 setShowAllTickers(val);
                 setCurrentPage(1);
               }}
+              onlyGoldenCross={onlyGoldenCross}
+              onToggleGoldenCross={(val) => {
+                setOnlyGoldenCross(val);
+                setCurrentPage(1);
+              }}
+              minVolumeFilter={minVolumeFilter}
+              onMinVolumeFilterChange={(val) => {
+                setMinVolumeFilter(val);
+                setCurrentPage(1);
+              }}
+              rsiFilter={rsiFilter}
+              onRsiFilterChange={(val) => {
+                setRsiFilter(val);
+                setCurrentPage(1);
+              }}
+              maxAtrFilter={maxAtrFilter}
+              onMaxAtrFilterChange={(val) => {
+                setMaxAtrFilter(val);
+                setCurrentPage(1);
+              }}
+              watchlistTickers={watchlistTickers}
+              onAddWatchlistTickers={handleAddWatchlistTickers}
+              onRemoveWatchlistTicker={handleRemoveWatchlistTicker}
+              onReplaceWatchlist={handleReplaceWatchlist}
             />
 
             {/* Tira de KPIs */}
@@ -765,11 +932,13 @@ export default function App() {
               </div>
             </section>
 
-            {/* Panel de detalle con verificación matemática si hay valor seleccionado */}
+            {/* Panel de detalle con gráfico interactivo, RSI/ATR, backtest y verificación matemática */}
             {selectedStock && (
               <StockDetailDrawer
                 stock={selectedStock}
                 proximityThresholdPct={proximityThresholdPct}
+                isWatched={watchlistSet.has(selectedStock.ticker)}
+                onToggleWatchlist={handleToggleWatchlist}
                 onClose={() => setSelectedTicker(null)}
               />
             )}
@@ -797,6 +966,8 @@ export default function App() {
                 )
               }
               selectedTicker={selectedTicker}
+              watchlistSet={watchlistSet}
+              onToggleWatchlist={handleToggleWatchlist}
               onResetFilters={handleResetFilters}
               onStartScan={() => void handleStartScan()}
               onExportCsv={handleExportCsv}
@@ -826,7 +997,7 @@ export default function App() {
             IBEX 35 · DAX 40 · S&amp;P 500 ({MARKETS_METADATA.IBEX35.totalExpected +
               MARKETS_METADATA.DAX.totalExpected +
               MARKETS_METADATA.SP500.totalExpected}{' '}
-            valores)
+            valores) · Watchlist ({watchlistTickers.length})
           </span>
         </div>
       </footer>

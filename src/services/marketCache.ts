@@ -74,6 +74,14 @@ export function clearMarketCache(market?: MarketId, timeframe?: Timeframe): void
     marketSeriesCache.delete(buildMarketCacheKey(market, timeframe));
     return;
   }
+  if (market) {
+    for (const key of Array.from(marketSeriesCache.keys())) {
+      if (key.startsWith(`${market}_`)) {
+        marketSeriesCache.delete(key);
+      }
+    }
+    return;
+  }
   marketSeriesCache.clear();
 }
 
