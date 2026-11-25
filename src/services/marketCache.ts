@@ -97,3 +97,46 @@ export function getActiveCacheCount(): number {
   }
   return marketSeriesCache.size;
 }
+
+/**
+ * Busca en todas las entradas vigentes del caché las series más recientes
+ * para un listado de tickers (útil para mostrar seguimiento en vivo en Watchlist).
+ */
+export function getCachedResponsesForTickers(
+  tickers: string[],
+  preferredTimeframe: Timeframe
+): Map<string, { response: YahooChartResponse; market: MarketId }> {
+  const result = new Map<string, { response: YahooChartResponse; market: MarketId }>();
+  if (tickers.length === 0) return result;
+
+  const wanted = new Set(tickers.map((t) => t.toUpperCase()));
+  const now = Date.now();
+
+  const validEntries: MarketCacheEntry[] = [];
+  for (const [key, entry] of marketSeriesCache.entries()) {
+    if (now > entry.expiresAt) {
+      marketSeriesCache.delete(key);
+    } else {
+      validEntries.push(entry);
+    }
+  }
+
+  // Priorizar entradas de la temporalidad activa y más recientes primero
+  validEntries.sort((a, b) => {
+    const prefA = a.timeframe === preferredTimeframe ? 1 : 0;
+    const prefB = b.timeframe === preferredTimeframe ? 1 : 0;
+    if (prefA !== prefB) return prefB - prefA;
+    return b.cachedAt - a.cachedAt;
+  });
+
+  for (const entry of validEntries) {
+    for (const res of entry.responses) {
+      const upper = res.ticker.toUpperCase();
+      if (wanted.has(upper) && !result.has(upper)) {
+        result.set(upper, { response: res, market: entry.market });
+      }
+    }
+  }
+
+  return result;
+}

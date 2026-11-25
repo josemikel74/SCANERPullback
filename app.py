@@ -174,6 +174,36 @@ def set_cache_entry(
     }
 
 
+def get_cached_responses_for_watchlist(
+    tickers: List[str], preferred_timeframe: str
+) -> Dict[str, tuple[Dict[str, Any], str]]:
+    """Busca en todo el caché vigente las series más recientes para cada ticker de la Watchlist."""
+    if not tickers:
+        return {}
+    wanted = {t.upper() for t in tickers}
+    now = time.time()
+    valid_entries: List[Dict[str, Any]] = []
+    for key in list(st.session_state.market_cache.keys()):
+        entry = st.session_state.market_cache[key]
+        if now > entry["expires_at"]:
+            del st.session_state.market_cache[key]
+        else:
+            valid_entries.append(entry)
+
+    valid_entries.sort(
+        key=lambda e: (1 if e["timeframe"] == preferred_timeframe else 0, e["cached_at"]),
+        reverse=True,
+    )
+
+    found: Dict[str, tuple[Dict[str, Any], str]] = {}
+    for entry in valid_entries:
+        for res in entry["responses"]:
+            upper = res["ticker"].upper()
+            if upper in wanted and upper not in found:
+                found[upper] = (res, entry["market"])
+    return found
+
+
 def evaluate_cached_market(
     responses: List[Dict[str, Any]],
     ticker_info_map: Dict[str, Dict[str, str]],
@@ -513,35 +543,148 @@ def main() -> None:
                 key="selected_sma_filter",
             )
 
-        # Gestor de Watchlist cuando está seleccionada
-        if market_id == "WATCHLIST":
-            with st.expander("Gestionar Watchlist Personalizada (Editar / Importar / Exportar JSON)", expanded=True):
-                wl_col1, wl_col2 = st.columns([2, 1])
-                with wl_col1:
-                    wl_text = st.text_input(
-                        "Tickers (separados por comas o espacios; soporta BME:ITX, XETR:SAP, AAPL)",
-                        value=", ".join(st.session_state.watchlist_tickers),
-                        key="wl_editor_text",
-                    )
-                    if st.button("Aplicar lista Watchlist"):
-                        st.session_state.watchlist_tickers = parse_watchlist_text(wl_text)
+        # Ventana WATCHLIST permanente en la pantalla principal (Seguimiento)
+        with st.expander(
+            f"★ WATCHLIST — Seguimiento de Acciones ({len(st.session_state.watchlist_tickers)} guardadas)",
+            expanded=True,
+        ):
+            wl_col1, wl_col2, wl_col3 = st.columns([2.2, 1.0, 1.0])
+            with wl_col1:
+                wl_add_input = st.text_input(
+                    "Añadir tickers a Watchlist (ej. ITX.MC, SAP.DE, AAPL, BME:SAN)",
+                    value="",
+                    placeholder="Introduce uno o varios tickers separados por coma...",
+                    key="wl_quick_add_input",
+                )
+            with wl_col2:
+                st.write("")
+                if st.button("Añadir a Watchlist", use_container_width=True, key="wl_quick_add_btn"):
+                    parsed_add = parse_watchlist_text(wl_add_input)
+                    if parsed_add:
+                        merged = normalize_watchlist_tokens(
+                            st.session_state.watchlist_tickers + parsed_add
+                        )
+                        st.session_state.watchlist_tickers = merged
                         for k in list(st.session_state.market_cache.keys()):
                             if k.startswith("WATCHLIST_"):
                                 del st.session_state.market_cache[k]
                         st.rerun()
-                with wl_col2:
-                    uploaded = st.file_uploader(
-                        "Importar JSON / TXT",
-                        type=["json", "txt", "csv"],
-                        key="wl_file_upload",
+            with wl_col3:
+                st.write("")
+                scan_wl_clicked = st.button(
+                    f"Escanear Watchlist ({timeframe})",
+                    disabled=len(st.session_state.watchlist_tickers) == 0,
+                    use_container_width=True,
+                    key="wl_scan_direct_btn",
+                )
+
+            if scan_wl_clicked and st.session_state.watchlist_tickers:
+                wl_universe = get_tickers_by_market("WATCHLIST", st.session_state.watchlist_tickers)
+                wl_progress = st.progress(0, text=f"Analizando 0 de {len(wl_universe)} acciones de Watchlist...")
+                wl_batch = fetch_market_batch(
+                    [t["ticker"] for t in wl_universe],
+                    timeframe=timeframe,
+                    on_progress=lambda p, tot, _inc: wl_progress.progress(
+                        int((p / max(1, tot)) * 100),
+                        text=f"Analizando Watchlist: {p} de {tot}...",
+                    ),
+                )
+                set_cache_entry("WATCHLIST", timeframe, wl_batch["results"], wl_batch["incidents"])
+                wl_progress.empty()
+                st.rerun()
+
+            wl_cached_map = get_cached_responses_for_watchlist(
+                st.session_state.watchlist_tickers, timeframe
+            )
+            wl_threshold_val = float(st.session_state.get("proximity_threshold", 1.5))
+            wl_is_prox = strategy_label.startswith("Modo A")
+
+            if not st.session_state.watchlist_tickers:
+                st.info("Tu Watchlist está vacía. Añade tickers arriba o desde el detalle de cualquier valor.")
+                if st.button("Restaurar selección inicial (8 valores)", key="wl_restore_defaults_btn"):
+                    st.session_state.watchlist_tickers = list(DEFAULT_WATCHLIST)
+                    st.rerun()
+            else:
+                wl_universe_info = {
+                    t["ticker"]: t
+                    for t in get_tickers_by_market("WATCHLIST", st.session_state.watchlist_tickers)
+                }
+                wl_table_rows: List[Dict[str, Any]] = []
+                for wl_t in st.session_state.watchlist_tickers:
+                    u_info = wl_universe_info.get(
+                        wl_t, {"ticker": wl_t, "name": wl_t, "sector": "Personalizado"}
                     )
-                    if uploaded is not None:
-                        imported = parse_watchlist_text(uploaded.read().decode("utf-8", errors="ignore"))
-                        if imported:
-                            st.session_state.watchlist_tickers = imported
-                            for k in list(st.session_state.market_cache.keys()):
-                                if k.startswith("WATCHLIST_"):
-                                    del st.session_state.market_cache[k]
+                    cached_pair = wl_cached_map.get(wl_t.upper())
+                    if cached_pair:
+                        res_obj, res_mkt = cached_pair
+                        eval_rows, _ = evaluate_cached_market(
+                            [res_obj],
+                            {wl_t: u_info},
+                            res_mkt,
+                            wl_threshold_val,
+                        )
+                        if eval_rows:
+                            er = eval_rows[0]
+                            m50 = er["prox_50"] if wl_is_prox else er["bounce_50"]
+                            m200 = er["prox_200"] if wl_is_prox else er["bounce_200"]
+                            sig_lbl = (
+                                "Confluencia 50+200"
+                                if (m50 and m200)
+                                else ("SMA 50" if m50 else ("SMA 200" if m200 else "Sin señal"))
+                            )
+                            macd_lbl = (
+                                f"{er['macd_line']:+.2f} ({'Cruce ↑' if er['is_macd_bullish_cross'] else ('Alcista' if er['is_macd_bullish'] else 'Bajista')})"
+                                if er["macd_line"] is not None
+                                else "—"
+                            )
+                            wl_table_rows.append(
+                                {
+                                    "Ticker": wl_t,
+                                    "Compañía": u_info["name"],
+                                    "Sector": u_info["sector"],
+                                    "Precio": f"{er['price']:.2f}",
+                                    "Var. %": f"{er['change_pct']:+.2f}%",
+                                    "Dist. SMA 50": f"{er['dist_50']:+.2f}%" if er["dist_50"] is not None else "—",
+                                    "Dist. SMA 200": f"{er['dist_200']:+.2f}%" if er["dist_200"] is not None else "—",
+                                    "MACD": macd_lbl,
+                                    "RSI 14": f"{er['rsi_14']:.1f}" if er["rsi_14"] is not None else "—",
+                                    "Seguimiento": sig_lbl,
+                                }
+                            )
+                            continue
+                    wl_table_rows.append(
+                        {
+                            "Ticker": wl_t,
+                            "Compañía": u_info["name"],
+                            "Sector": u_info["sector"],
+                            "Precio": "—",
+                            "Var. %": "—",
+                            "Dist. SMA 50": "—",
+                            "Dist. SMA 200": "—",
+                            "MACD": "—",
+                            "RSI 14": "—",
+                            "Seguimiento": "Sin escanear",
+                        }
+                    )
+
+                st.dataframe(pd.DataFrame(wl_table_rows), use_container_width=True, hide_index=True)
+
+                wl_m1, wl_m2, wl_m3, wl_m4 = st.columns([1.8, 1.0, 1.0, 0.8])
+                with wl_m1:
+                    to_remove = st.selectbox(
+                        "Quitar acción de Watchlist",
+                        options=st.session_state.watchlist_tickers,
+                        key="wl_remove_select",
+                    )
+                with wl_m2:
+                    st.write("")
+                    if st.button("Quitar seleccionada", use_container_width=True, key="wl_remove_btn"):
+                        st.session_state.watchlist_tickers = [
+                            t for t in st.session_state.watchlist_tickers if t != to_remove
+                        ]
+                        st.rerun()
+                with wl_m3:
+                    st.write("")
                     st.download_button(
                         "Exportar Watchlist JSON",
                         data=json.dumps(
@@ -552,6 +695,30 @@ def main() -> None:
                         mime="application/json",
                         use_container_width=True,
                     )
+                with wl_m4:
+                    st.write("")
+                    if st.button("Vaciar", use_container_width=True, key="wl_clear_all_btn"):
+                        st.session_state.watchlist_tickers = []
+                        st.rerun()
+
+                uploaded = st.file_uploader(
+                    "Importar Watchlist (JSON / TXT / CSV)",
+                    type=["json", "txt", "csv"],
+                    key="wl_file_upload",
+                )
+                if uploaded is not None:
+                    upload_sig = f"{uploaded.name}:{uploaded.size}"
+                    if st.session_state.get("last_wl_upload_sig") != upload_sig:
+                        imported = parse_watchlist_text(
+                            uploaded.read().decode("utf-8", errors="ignore")
+                        )
+                        st.session_state.last_wl_upload_sig = upload_sig
+                        if imported:
+                            st.session_state.watchlist_tickers = imported
+                            for k in list(st.session_state.market_cache.keys()):
+                                if k.startswith("WATCHLIST_"):
+                                    del st.session_state.market_cache[k]
+                            st.rerun()
 
         # Segunda fila de controles
         c_thresh, c_search, c_sector, c_all, c_btn_start, c_btn_stop = st.columns(

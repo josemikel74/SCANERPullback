@@ -1,19 +1,10 @@
-import { useRef, useState } from 'react';
 import {
-  Download,
   Play,
-  Plus,
   Search,
   Square,
   Star,
-  Upload,
-  X,
 } from 'lucide-react';
 import { MARKETS_METADATA, getTickersByMarket } from '../data/tickersData';
-import {
-  exportWatchlistJson,
-  parseWatchlistImport,
-} from '../services/watchlistService';
 import type {
   MarketId,
   MaxAtrDistanceFilter,
@@ -57,11 +48,8 @@ interface ScannerControlsProps {
   onRsiFilterChange: (val: RsiFilterMode) => void;
   maxAtrFilter: MaxAtrDistanceFilter;
   onMaxAtrFilterChange: (val: MaxAtrDistanceFilter) => void;
-  // Watchlist personalizada
+  // Watchlist personalizada (para contador en selector de mercado)
   watchlistTickers: string[];
-  onAddWatchlistTickers: (tickers: string[]) => void;
-  onRemoveWatchlistTicker: (ticker: string) => void;
-  onReplaceWatchlist: (tickers: string[]) => void;
 }
 
 const MARKETS: MarketId[] = ['IBEX35', 'DAX', 'SP500', 'EUROPE', 'WATCHLIST'];
@@ -104,48 +92,8 @@ export function ScannerControls({
   maxAtrFilter,
   onMaxAtrFilterChange,
   watchlistTickers,
-  onAddWatchlistTickers,
-  onRemoveWatchlistTicker,
-  onReplaceWatchlist,
 }: ScannerControlsProps) {
   const isScanning = scanStatus === 'SCANNING';
-  const [watchlistInput, setWatchlistInput] = useState('');
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const handleAddInput = () => {
-    const parsed = parseWatchlistImport(watchlistInput);
-    if (parsed.length > 0) {
-      onAddWatchlistTickers(parsed);
-      setWatchlistInput('');
-    }
-  };
-
-  const handleExportWatchlist = () => {
-    const content = exportWatchlistJson(watchlistTickers);
-    const blob = new Blob([content], { type: 'application/json;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'watchlist_pullbacks.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const parsed = parseWatchlistImport(text);
-      if (parsed.length > 0) {
-        onReplaceWatchlist(parsed);
-      }
-    } finally {
-      e.target.value = '';
-    }
-  };
 
   return (
     <section
@@ -282,90 +230,6 @@ export function ScannerControls({
           )}
         </div>
       </div>
-
-      {/* Gestor contextual de Watchlist cuando está seleccionada */}
-      {market === 'WATCHLIST' && (
-        <div className="border border-[#E2E8F0] bg-[#F8FAFC] rounded-lg p-3.5 space-y-3">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2 flex-1">
-              <input
-                type="text"
-                value={watchlistInput}
-                onChange={(e) => setWatchlistInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddInput();
-                  }
-                }}
-                placeholder="Añadir tickers (ej. ITX.MC, SAP.DE, AAPL, BME:SAN)..."
-                aria-label="Añadir tickers a Watchlist"
-                className="flex-1 min-w-[240px] px-3 py-1.5 text-xs bg-white border border-[#E2E8F0] rounded-lg text-[#0F172A] placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-blue-600 font-mono"
-              />
-              <button
-                type="button"
-                onClick={handleAddInput}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#0F172A] hover:bg-[#1E293B] rounded-lg transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>Añadir</span>
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,.txt,.csv"
-                className="hidden"
-                onChange={(e) => void handleImportFile(e)}
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#334155] bg-white border border-[#E2E8F0] rounded-lg hover:bg-[#F1F5F9]"
-              >
-                <Upload className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>Importar JSON/TXT</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleExportWatchlist}
-                disabled={watchlistTickers.length === 0}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#334155] bg-white border border-[#E2E8F0] rounded-lg hover:bg-[#F1F5F9] disabled:opacity-40"
-              >
-                <Download className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>Exportar JSON</span>
-              </button>
-            </div>
-          </div>
-
-          {watchlistTickers.length === 0 ? (
-            <p className="text-xs text-[#64748B]">
-              Tu Watchlist está vacía. Añade tickers arriba o pulsa la estrella ★ en cualquier tabla.
-            </p>
-          ) : (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {watchlistTickers.map((t) => (
-                <span
-                  key={t}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-[#E2E8F0] rounded text-[11px] font-mono font-semibold text-[#0F172A]"
-                >
-                  <span>{t}</span>
-                  <button
-                    type="button"
-                    onClick={() => onRemoveWatchlistTicker(t)}
-                    aria-label={`Quitar ${t} de Watchlist`}
-                    className="text-[#94A3B8] hover:text-[#DC2626]"
-                  >
-                    <X className="w-3 h-3" aria-hidden="true" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Separador sutil */}
       <div className="border-t border-[#E2E8F0]" />

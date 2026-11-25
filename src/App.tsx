@@ -7,13 +7,19 @@ import { StockDetailDrawer } from './components/StockDetailDrawer';
 import { TopBar } from './components/TopBar';
 import { UniverseView } from './components/UniverseView';
 import {
+  WatchlistPanel,
+  type WatchlistDisplayItem,
+} from './components/WatchlistPanel';
+import {
   MARKETS_METADATA,
   getTickersByMarket,
   inferTickerCurrencySymbol,
+  resolveTickerInfo,
 } from './data/tickersData';
 import {
   clearMarketCache,
   getCachedMarketEntry,
+  getCachedResponsesForTickers,
   setCachedMarketEntry,
 } from './services/marketCache';
 import {
@@ -237,10 +243,11 @@ function mapYahooResponseToStockResult(
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveViewTab>('SCANNER');
 
-  // Watchlist personalizada (localStorage)
+  // Watchlist personalizada (localStorage) y visibilidad en pantalla principal
   const [watchlistTickers, setWatchlistTickers] = useState<string[]>(() =>
     loadWatchlistTickers()
   );
+  const [isWatchlistOpen, setIsWatchlistOpen] = useState<boolean>(true);
 
   // Controles de escaneo
   const [market, setMarket] = useState<MarketId>('IBEX35');
@@ -322,10 +329,56 @@ export default function App() {
     return { evaluatedData: results, recalcMs: elapsed };
   }, [rawResponses, tickerInfoMap, market, proximityThresholdPct]);
 
+  const watchlistDisplayItems = useMemo<WatchlistDisplayItem[]>(() => {
+    const currentMap = new Map<string, StockAnalysisResult>(
+      evaluatedData.map((row) => [row.ticker.toUpperCase(), row])
+    );
+    const cachedMap = getCachedResponsesForTickers(watchlistTickers, timeframe);
+
+    return watchlistTickers.map((ticker) => {
+      const upper = ticker.toUpperCase();
+      const info = resolveTickerInfo(upper);
+      const currentMatch = currentMap.get(upper);
+      if (currentMatch) {
+        return {
+          ticker: info.ticker,
+          name: info.name,
+          sector: info.sector,
+          analysis: currentMatch,
+        };
+      }
+      const cached = cachedMap.get(upper);
+      if (cached) {
+        return {
+          ticker: info.ticker,
+          name: info.name,
+          sector: info.sector,
+          analysis: mapYahooResponseToStockResult(
+            cached.response,
+            info,
+            cached.market,
+            proximityThresholdPct
+          ),
+        };
+      }
+      return {
+        ticker: info.ticker,
+        name: info.name,
+        sector: info.sector,
+        analysis: null,
+      };
+    });
+  }, [watchlistTickers, evaluatedData, timeframe, proximityThresholdPct]);
+
   const selectedStock = useMemo(() => {
     if (!selectedTicker) return null;
-    return evaluatedData.find((s) => s.ticker === selectedTicker) ?? null;
-  }, [evaluatedData, selectedTicker]);
+    const fromEvaluated = evaluatedData.find((s) => s.ticker === selectedTicker);
+    if (fromEvaluated) return fromEvaluated;
+    return (
+      watchlistDisplayItems.find((w) => w.ticker === selectedTicker)?.analysis ??
+      null
+    );
+  }, [evaluatedData, watchlistDisplayItems, selectedTicker]);
 
   // Control anti-errores transparente: tickers omitidos por error de red o historial insuficiente
   const omittedTickers = useMemo<OmittedTickerItem[]>(() => {
@@ -606,9 +659,20 @@ export default function App() {
     }
   };
 
-  const handleStartScan = async () => {
-    if (activeUniverse.length === 0) return;
+  const handleStartScan = async (overrideMarket?: MarketId) => {
+    const targetMarket = overrideMarket ?? market;
+    const targetUniverse =
+      targetMarket === market
+        ? activeUniverse
+        : getTickersByMarket(targetMarket, watchlistTickers);
+
+    if (targetUniverse.length === 0) return;
     abortActiveScan();
+
+    if (overrideMarket && overrideMarket !== market) {
+      setMarket(overrideMarket);
+      setSelectedSector('ALL');
+    }
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -623,8 +687,8 @@ export default function App() {
 
     try {
       const { results, incidents, aborted } = await fetchMarketBatch(
-        activeUniverse.map((t) => t.ticker),
-        market,
+        targetUniverse.map((t) => t.ticker),
+        targetMarket,
         timeframe,
         (update) => {
           if (controller.signal.aborted) return;
@@ -647,7 +711,7 @@ export default function App() {
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
         if (!aborted && results.length > 0) {
-          setCachedMarketEntry(market, timeframe, results, incidents);
+          setCachedMarketEntry(targetMarket, timeframe, results, incidents);
         }
         setScanStatus(aborted ? 'STOPPED' : 'COMPLETED');
       }
@@ -915,9 +979,6 @@ export default function App() {
                 setCurrentPage(1);
               }}
               watchlistTickers={watchlistTickers}
-              onAddWatchlistTickers={handleAddWatchlistTickers}
-              onRemoveWatchlistTicker={handleRemoveWatchlistTicker}
-              onReplaceWatchlist={handleReplaceWatchlist}
             />
 
             {/* Tira de KPIs */}
@@ -972,6 +1033,28 @@ export default function App() {
                 onClose={() => setSelectedTicker(null)}
               />
             )}
+
+            {/* Ventana Watchlist permanente en pantalla principal */}
+            <WatchlistPanel
+              watchlistTickers={watchlistTickers}
+              items={watchlistDisplayItems}
+              timeframe={timeframe}
+              strategy={strategy}
+              proximityThresholdPct={proximityThresholdPct}
+              scanStatus={scanStatus}
+              selectedTicker={selectedTicker}
+              isOpen={isWatchlistOpen}
+              onToggleOpen={() => setIsWatchlistOpen((prev) => !prev)}
+              onAddTickers={handleAddWatchlistTickers}
+              onRemoveTicker={handleRemoveWatchlistTicker}
+              onReplaceWatchlist={handleReplaceWatchlist}
+              onScanWatchlist={() => void handleStartScan('WATCHLIST')}
+              onSelectStock={(stock) =>
+                setSelectedTicker((prev) =>
+                  prev === stock.ticker ? null : stock.ticker
+                )
+              }
+            />
 
             {/* Tabla principal */}
             <ResultsTable

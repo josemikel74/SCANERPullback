@@ -10,7 +10,8 @@ El repositorio es **100% dual-compatible**:
 
 ## Características Principales
 
-- **Fuente Única de Verdad (`data/tickers.json`)**: Los **580 valores oficiales** (35 del IBEX 35 con `.MC`, 40 del DAX 40 con `.DE` y 505 del S&P 500) son compartidos exactamente entre TypeScript y Python, incluyendo soporte para **Europa (75)** y **Watchlist personalizada** (`localStorage` + importación/exportación JSON/TXT y formato TradingView `BME:`/`XETR:`).
+- **Fuente Única de Verdad (`data/tickers.json`)**: Los **580 valores oficiales** (35 del IBEX 35 con `.MC`, 40 del DAX 40 con `.DE` y 505 del S&P 500) son compartidos exactamente entre TypeScript y Python, incluyendo soporte para **Europa (75)**.
+- **Ventana WATCHLIST en Pantalla Principal**: Sección permanente de seguimiento con persistencia en `localStorage`, sincronización en vivo con el caché multi-mercado (Precio, Var. %, Dist. SMA 50/200, MACD, RSI 14 y estado de pullback), alta/baja instantánea con `★`, escaneo directo e importación/exportación JSON/TXT (incluyendo prefijos `BME:`/`XETR:`).
 - **Gráfico Interactivo OHLC + SMA 50 / SMA 200 + MACD**: Visualizador SVG responsivo sin dependencias externas en React (y Plotly en Streamlit) con banda sombreada `±umbral%`, volumen inferior, panel **MACD (12, 26, 9)** y tooltip *crosshair* con **RSI (14)** y **MACD**.
 - **Filtros Técnicos Avanzados (en memoria, sin peticiones extra)**:
   - **Golden Cross**: Filtra valores con `SMA 50 > SMA 200`.
@@ -54,7 +55,8 @@ El repositorio es **100% dual-compatible**:
 │   │   ├── ScannerControls.tsx     # Selectores de mercado, filtros técnicos (Golden Cross, Cruce MACD) y Watchlist
 │   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, MACD, gráfico OHLC y Backtest rápido
 │   │   ├── TopBar.tsx
-│   │   └── UniverseView.tsx
+│   │   ├── UniverseView.tsx
+│   │   └── WatchlistPanel.tsx      # Ventana WATCHLIST permanente en pantalla principal
 │   ├── data/tickersData.ts     # Cargador SSOT desde data/tickers.json
 │   ├── services/
 │   │   ├── marketCache.ts      # Caché Map `${mercado}_${temporalidad}` (TTL 5 min)
