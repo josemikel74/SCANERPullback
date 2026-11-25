@@ -2,6 +2,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ArrowUpRight,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -530,6 +531,16 @@ export function ResultsTable({
                   <th className="py-2.5 px-3 text-right whitespace-nowrap">
                     <button
                       type="button"
+                      onClick={() => onSort('macd')}
+                      className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
+                    >
+                      <span>MACD</span>
+                      {renderSortIcon('macd')}
+                    </button>
+                  </th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                    <button
+                      type="button"
                       onClick={() => onSort('atrDistance')}
                       className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
                     >
@@ -648,6 +659,50 @@ export function ResultsTable({
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-[#334155] tabular-nums whitespace-nowrap">
                         {row.rsi14 !== null ? row.rsi14.toFixed(1) : '—'}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                        {row.macdLine !== null && row.macdSignal !== null ? (
+                          <div className="inline-flex flex-col items-end leading-tight">
+                            <span
+                              className={
+                                row.isMacdBullishCross
+                                  ? 'text-[#059669] font-semibold'
+                                  : 'text-[#0F172A] font-medium'
+                              }
+                            >
+                              {row.macdLine >= 0 ? '+' : ''}
+                              {row.macdLine.toFixed(2)}
+                            </span>
+                            <span
+                              className={`inline-flex items-center gap-0.5 text-[10px] ${
+                                row.isMacdBullishCross
+                                  ? 'text-[#059669] font-semibold'
+                                  : row.isMacdBullish
+                                    ? 'text-[#1D4ED8]'
+                                    : 'text-[#64748B]'
+                              }`}
+                            >
+                              {row.isMacdBullishCross && (
+                                <ArrowUpRight className="w-2.5 h-2.5" aria-hidden="true" />
+                              )}
+                              <span>
+                                {row.isMacdBullishCross
+                                  ? 'Cruce ↑'
+                                  : row.isMacdBullish
+                                    ? 'Alcista'
+                                    : 'Bajista'}
+                              </span>
+                              {row.macdHistogram !== null && (
+                                <span className="text-[#94A3B8]">
+                                  ({row.macdHistogram >= 0 ? '+' : ''}
+                                  {row.macdHistogram.toFixed(2)})
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-[#94A3B8]">—</span>
+                        )}
                       </td>
                       <td className="py-2 px-3 text-right font-mono text-[#475569] tabular-nums whitespace-nowrap">
                         {atrDist !== null

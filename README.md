@@ -11,9 +11,11 @@ El repositorio es **100% dual-compatible**:
 ## Características Principales
 
 - **Fuente Única de Verdad (`data/tickers.json`)**: Los **580 valores oficiales** (35 del IBEX 35 con `.MC`, 40 del DAX 40 con `.DE` y 505 del S&P 500) son compartidos exactamente entre TypeScript y Python, incluyendo soporte para **Europa (75)** y **Watchlist personalizada** (`localStorage` + importación/exportación JSON/TXT y formato TradingView `BME:`/`XETR:`).
-- **Gráfico Interactivo OHLC + SMA 50 / SMA 200**: Visualizador SVG responsivo sin dependencias externas en React (y Plotly en Streamlit) con banda sombreada `±umbral%`, volumen inferior y tooltip *crosshair* con **RSI (14)**.
+- **Gráfico Interactivo OHLC + SMA 50 / SMA 200 + MACD**: Visualizador SVG responsivo sin dependencias externas en React (y Plotly en Streamlit) con banda sombreada `±umbral%`, volumen inferior, panel **MACD (12, 26, 9)** y tooltip *crosshair* con **RSI (14)** y **MACD**.
 - **Filtros Técnicos Avanzados (en memoria, sin peticiones extra)**:
   - **Golden Cross**: Filtra valores con `SMA 50 > SMA 200`.
+  - **Cruce MACD (al alza)**: Filtra valores cuya línea `MACD (12, 26)` cruza al alza sobre su `Señal EMA (9)` (`MACD anterior ≤ Señal anterior` y `MACD actual > Señal actual`).
+  - **MACD (12, 26, 9)** en tabla, detalle, gráfico y CSV (`MACD`, `Señal`, `Histograma` y estado de cruce).
   - **RSI (14)** suavizado de Wilder: Filtro rápido `< 55` o zona pullback `35–55`.
   - **ATR (14)** de Wilder y **Distancia Normalizada en ATR** `(Cierre - SMA) / ATR(14)`.
   - **Volumen Relativo mínimo** sobre media de 20 velas (`≥ 1,2x`, `≥ 1,5x`, `≥ 2,0x`).
@@ -42,15 +44,15 @@ El repositorio es **100% dual-compatible**:
 │   ├── __init__.py
 │   ├── tickers_data.py         # Cargador SSOT desde data/tickers.json + Europa/Watchlist
 │   ├── yahoo_service.py        # yf.download vectorizado + fallback query1/query2 y velas 4h
-│   └── indicators.py           # SMA 50/200, RSI(14), ATR(14), Golden Cross y Backtest rápido
+│   └── indicators.py           # SMA 50/200, MACD(12,26,9), RSI(14), ATR(14), Golden Cross y Backtest
 ├── src/
 │   ├── components/
-│   │   ├── CandlestickChart.tsx    # Gráfico OHLC SVG interactivo + SMA 50/200 + banda ±%
+│   │   ├── CandlestickChart.tsx    # Gráfico OHLC SVG interactivo + SMA 50/200 + panel MACD(12,26,9)
 │   │   ├── MethodologyView.tsx
 │   │   ├── OmittedTickersPanel.tsx
-│   │   ├── ResultsTable.tsx        # Tabla ordenable, estrella Watchlist, RSI, Dist. ATR y micro-barras
-│   │   ├── ScannerControls.tsx     # Selectores de mercado, filtros avanzados y gestor Watchlist
-│   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, gráfico OHLC y Backtest rápido
+│   │   ├── ResultsTable.tsx        # Tabla ordenable, Watchlist, MACD, RSI, Dist. ATR y micro-barras
+│   │   ├── ScannerControls.tsx     # Selectores de mercado, filtros técnicos (Golden Cross, Cruce MACD) y Watchlist
+│   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, MACD, gráfico OHLC y Backtest rápido
 │   │   ├── TopBar.tsx
 │   │   └── UniverseView.tsx
 │   ├── data/tickersData.ts     # Cargador SSOT desde data/tickers.json

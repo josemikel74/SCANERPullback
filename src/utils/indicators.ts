@@ -12,6 +12,9 @@ export const SMA_HISTORY_LOOKBACK = 15;
 export const BOUNCE_TOUCH_TOLERANCE = 1.002;
 export const RSI_DEFAULT_PERIOD = 14;
 export const ATR_DEFAULT_PERIOD = 14;
+export const MACD_FAST_PERIOD = 12;
+export const MACD_SLOW_PERIOD = 26;
+export const MACD_SIGNAL_PERIOD = 9;
 
 /**
  * Configuración para la evaluación de estrategias de pullback sobre SMA 50 y SMA 200.
@@ -102,6 +105,89 @@ export function calculateSMASeries(
     }
   }
   return result;
+}
+
+/**
+ * Calcula la Media Móvil Exponencial (EMA) inicializada con SMA sobre los primeros `period` valores.
+ */
+export function calculateEMASeries(
+  values: number[],
+  period: number
+): Array<number | null> {
+  const n = values.length;
+  const result: Array<number | null> = new Array(n).fill(null);
+  if (period <= 0 || n < period) {
+    return result;
+  }
+
+  let seedSum = 0;
+  for (let i = 0; i < period; i++) {
+    seedSum += values[i];
+  }
+  let ema = seedSum / period;
+  result[period - 1] = ema;
+
+  const multiplier = 2 / (period + 1);
+  for (let i = period; i < n; i++) {
+    ema = (values[i] - ema) * multiplier + ema;
+    result[i] = ema;
+  }
+  return result;
+}
+
+export interface MacdSeriesOutput {
+  macdLine: Array<number | null>;
+  signalLine: Array<number | null>;
+  histogram: Array<number | null>;
+}
+
+/**
+ * Calcula las series completas de MACD (12, 26, 9): Línea MACD, Línea Señal e Histograma.
+ */
+export function calculateMACDSeries(
+  closes: number[],
+  fastPeriod = MACD_FAST_PERIOD,
+  slowPeriod = MACD_SLOW_PERIOD,
+  signalPeriod = MACD_SIGNAL_PERIOD
+): MacdSeriesOutput {
+  const n = closes.length;
+  const macdLine: Array<number | null> = new Array(n).fill(null);
+  const signalLine: Array<number | null> = new Array(n).fill(null);
+  const histogram: Array<number | null> = new Array(n).fill(null);
+
+  if (n < slowPeriod + signalPeriod) {
+    return { macdLine, signalLine, histogram };
+  }
+
+  const emaFast = calculateEMASeries(closes, fastPeriod);
+  const emaSlow = calculateEMASeries(closes, slowPeriod);
+
+  const validMacdValues: number[] = [];
+  const validMacdIndexes: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const f = emaFast[i];
+    const s = emaSlow[i];
+    if (f !== null && s !== null) {
+      const diff = f - s;
+      macdLine[i] = diff;
+      validMacdValues.push(diff);
+      validMacdIndexes.push(i);
+    }
+  }
+
+  const signalOnValid = calculateEMASeries(validMacdValues, signalPeriod);
+  for (let j = 0; j < validMacdIndexes.length; j++) {
+    const origIdx = validMacdIndexes[j];
+    const sig = signalOnValid[j];
+    const macdVal = macdLine[origIdx];
+    if (sig !== null && macdVal !== null) {
+      signalLine[origIdx] = sig;
+      histogram[origIdx] = macdVal - sig;
+    }
+  }
+
+  return { macdLine, signalLine, histogram };
 }
 
 /**
@@ -356,7 +442,6 @@ function evaluateSingleSma(
   proximityMatch: boolean;
   bounceMatch: boolean;
 } {
-  // Validación estricta de tamaño mínimo requerido para el periodo (50 o 200 velas válidas)
   if (validCandles.length < period) {
     return {
       diagnostics: emptyDiagnostics(),
@@ -382,11 +467,8 @@ function evaluateSingleSma(
   const prevCandle = n >= 2 ? validCandles[n - 2] : null;
   const currentClose = currentCandle.close;
 
-  // Pendiente de la SMA: SMA actual >= SMA hace 10 velas
   const slopePositiveOrFlat = sma10Ago !== null && smaCurrent >= sma10Ago;
 
-  // Verificación de contexto previo: el precio hace 5-15 velas cotizaba por encima de dicha media.
-  // Se exige que la mayoría de velas válidas en la ventana [5..15] cerraran por encima de su SMA.
   let checkedOffsets = 0;
   let aboveCount = 0;
   for (let offset = 5; offset <= 15; offset++) {
@@ -402,27 +484,21 @@ function evaluateSingleSma(
   const wasAboveIn5To15 =
     checkedOffsets > 0 && aboveCount >= Math.ceil(checkedOffsets * 0.6);
 
-  // Distancia porcentual actual: ((PrecioActual - SMA) / SMA) * 100
   const distancePct = ((currentClose - smaCurrent) / smaCurrent) * 100;
   const absThreshold = Math.abs(proximityThresholdPct);
 
-  // Modo A — Zona de Proximidad:
-  // Pendiente >= 0 (SMA actual >= SMA hace 10 velas) + precio hace 5-15 velas > SMA + cercanía dentro [-umbral%, +umbral%]
   const proximityMatch =
     slopePositiveOrFlat &&
     wasAboveIn5To15 &&
     distancePct >= -absThreshold &&
     distancePct <= absThreshold;
 
-  // Modo B — Toque y Rebote Estricto:
-  // Toque: Low de vela actual o inmediatamente anterior <= SMA * 1.002 (con SMA correspondiente)
   const smaPrev = smaLast16[1] ?? smaCurrent;
   const touchedCurrent = currentCandle.low <= smaCurrent * BOUNCE_TOUCH_TOLERANCE;
   const touchedPrev =
     prevCandle !== null && smaPrev !== null && prevCandle.low <= smaPrev * BOUNCE_TOUCH_TOLERANCE;
   const touchedRecently = touchedCurrent || touchedPrev;
 
-  // Rebote: Close actual cotiza estrictamente por encima de la SMA actual
   const closedStrictlyAbove = currentClose > smaCurrent;
 
   const bounceMatch =
@@ -446,7 +522,7 @@ function evaluateSingleSma(
 
 /**
  * Motor matemático completo de evaluación de pullbacks sobre SMA 50/200, RSI(14), ATR(14),
- * Golden Cross y Backtest rápido sobre velas descargadas.
+ * MACD(12,26,9), Golden Cross y Backtest rápido sobre velas descargadas.
  */
 export function evaluatePullbackSignals(
   candles: OHLCVCandle[],
@@ -471,6 +547,11 @@ export function evaluatePullbackSignals(
       atr14: null,
       atrDistance50: null,
       atrDistance200: null,
+      macdLine: null,
+      macdSignal: null,
+      macdHistogram: null,
+      isMacdBullishCross: false,
+      isMacdBullish: false,
       isGoldenCross: false,
       backtest: {
         evaluatedBars: 0,
@@ -501,6 +582,29 @@ export function evaluatePullbackSignals(
   const rsi14 = calculateRSI14(closes, RSI_DEFAULT_PERIOD);
   const atr14 = calculateATR14(validCandles, ATR_DEFAULT_PERIOD);
 
+  const macdSeries = calculateMACDSeries(
+    closes,
+    MACD_FAST_PERIOD,
+    MACD_SLOW_PERIOD,
+    MACD_SIGNAL_PERIOD
+  );
+  const n = closes.length;
+  const macdLine = n >= 1 ? macdSeries.macdLine[n - 1] : null;
+  const macdSignal = n >= 1 ? macdSeries.signalLine[n - 1] : null;
+  const macdHistogram = n >= 1 ? macdSeries.histogram[n - 1] : null;
+  const prevMacd = n >= 2 ? macdSeries.macdLine[n - 2] : null;
+  const prevSignal = n >= 2 ? macdSeries.signalLine[n - 2] : null;
+
+  const isMacdBullishCross =
+    macdLine !== null &&
+    macdSignal !== null &&
+    prevMacd !== null &&
+    prevSignal !== null &&
+    prevMacd <= prevSignal &&
+    macdLine > macdSignal;
+  const isMacdBullish =
+    macdLine !== null && macdSignal !== null && macdLine > macdSignal;
+
   const sma50 = eval50.diagnostics.smaCurrent;
   const sma200 = eval200.diagnostics.smaCurrent;
 
@@ -528,6 +632,11 @@ export function evaluatePullbackSignals(
     atr14,
     atrDistance50,
     atrDistance200,
+    macdLine,
+    macdSignal,
+    macdHistogram,
+    isMacdBullishCross,
+    isMacdBullish,
     isGoldenCross,
     backtest,
   };

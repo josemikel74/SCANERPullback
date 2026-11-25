@@ -33,6 +33,7 @@ export type SortColumn =
   | 'distanceSma50Pct'
   | 'distanceSma200Pct'
   | 'rsi14'
+  | 'macd'
   | 'atrDistance'
   | 'volumeRatio';
 
@@ -126,6 +127,11 @@ export interface StockAnalysisResult {
   atr14: number | null;
   atrDistance50: number | null;
   atrDistance200: number | null;
+  macdLine: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  isMacdBullishCross: boolean;
+  isMacdBullish: boolean;
   isGoldenCross: boolean;
   backtest: PullbackBacktestStats;
   candles: OHLCVCandle[];
@@ -197,6 +203,11 @@ export interface SmaEvaluationOutput {
   atr14: number | null;
   atrDistance50: number | null;
   atrDistance200: number | null;
+  macdLine: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  isMacdBullishCross: boolean;
+  isMacdBullish: boolean;
   isGoldenCross: boolean;
   backtest: PullbackBacktestStats;
 }

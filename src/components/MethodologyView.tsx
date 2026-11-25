@@ -44,11 +44,14 @@ export function MethodologyView() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
           <div className="border border-[#E2E8F0] rounded-xl p-4 space-y-1.5">
-            <h4 className="text-xs font-bold text-[#0F172A]">RSI (14) &amp; Golden Cross</h4>
+            <h4 className="text-xs font-bold text-[#0F172A]">RSI (14), MACD (12,26,9) &amp; Golden Cross</h4>
             <p className="text-xs text-[#475569] leading-relaxed">
-              Calcula el RSI suavizado de Wilder (14 periodos) y la condición estructural{' '}
-              <span className="font-mono">SMA 50 &gt; SMA 200</span> sin llamadas adicionales de red,
-              permitiendo filtrar retrocesos sanos en zona 35–55.
+              Calcula el RSI suavizado de Wilder (14), el oscilador{' '}
+              <span className="font-mono">MACD = EMA(12) - EMA(26)</span> con línea señal{' '}
+              <span className="font-mono">EMA(9)</span> (detectando cruces al alza{' '}
+              <span className="font-mono">MACD<sub>t-1</sub> ≤ Señal<sub>t-1</sub></span> y{' '}
+              <span className="font-mono">MACD<sub>t</sub> &gt; Señal<sub>t</sub></span>) y{' '}
+              <span className="font-mono">SMA 50 &gt; SMA 200</span>.
             </p>
           </div>
 

@@ -1,9 +1,13 @@
 import { useMemo, useState } from 'react';
 import type { MatchedSma, OHLCVCandle, Timeframe } from '../types/market';
 import {
+  MACD_FAST_PERIOD,
+  MACD_SIGNAL_PERIOD,
+  MACD_SLOW_PERIOD,
   RSI_DEFAULT_PERIOD,
   SMA_LONG_PERIOD,
   SMA_SHORT_PERIOD,
+  calculateMACDSeries,
   calculateRSISeries,
   calculateSMASeries,
 } from '../utils/indicators';
@@ -100,6 +104,7 @@ export function CandlestickChart({
   const [bandTarget, setBandTarget] = useState<BandTarget>(
     matchedSma === 'SMA200' ? 'SMA200' : 'SMA50'
   );
+  const [showMacdPanel, setShowMacdPanel] = useState<boolean>(true);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   const series = useMemo(() => {
@@ -107,12 +112,21 @@ export function CandlestickChart({
     const sma50All = calculateSMASeries(closes, SMA_SHORT_PERIOD);
     const sma200All = calculateSMASeries(closes, SMA_LONG_PERIOD);
     const rsiAll = calculateRSISeries(closes, RSI_DEFAULT_PERIOD);
+    const macdAll = calculateMACDSeries(
+      closes,
+      MACD_FAST_PERIOD,
+      MACD_SLOW_PERIOD,
+      MACD_SIGNAL_PERIOD
+    );
 
     const start = Math.max(0, candles.length - windowBars);
     const slicedCandles = candles.slice(start);
     const slicedSma50 = sma50All.slice(start);
     const slicedSma200 = sma200All.slice(start);
     const slicedRsi = rsiAll.slice(start);
+    const slicedMacdLine = macdAll.macdLine.slice(start);
+    const slicedMacdSignal = macdAll.signalLine.slice(start);
+    const slicedMacdHist = macdAll.histogram.slice(start);
 
     let minPrice = Infinity;
     let maxPrice = -Infinity;
@@ -141,12 +155,27 @@ export function CandlestickChart({
       maxPrice = 100;
     }
 
+    let maxAbsMacd = 0;
+    for (let i = 0; i < slicedCandles.length; i++) {
+      const m = slicedMacdLine[i];
+      const s = slicedMacdSignal[i];
+      const h = slicedMacdHist[i];
+      if (m !== null) maxAbsMacd = Math.max(maxAbsMacd, Math.abs(m));
+      if (s !== null) maxAbsMacd = Math.max(maxAbsMacd, Math.abs(s));
+      if (h !== null) maxAbsMacd = Math.max(maxAbsMacd, Math.abs(h));
+    }
+    if (maxAbsMacd <= 0) maxAbsMacd = 1;
+
     const pad = (maxPrice - minPrice) * 0.08;
     return {
       candles: slicedCandles,
       sma50: slicedSma50,
       sma200: slicedSma200,
       rsi: slicedRsi,
+      macdLine: slicedMacdLine,
+      macdSignal: slicedMacdSignal,
+      macdHist: slicedMacdHist,
+      maxAbsMacd: maxAbsMacd * 1.15,
       minPrice: Math.max(0, minPrice - pad),
       maxPrice: maxPrice + pad,
       maxVol: maxVol > 0 ? maxVol : 1,
@@ -162,14 +191,17 @@ export function CandlestickChart({
   }
 
   const width = 920;
-  const height = 300;
+  const macdPanelHeight = showMacdPanel ? 78 : 0;
+  const macdGap = showMacdPanel ? 16 : 0;
+  const height = 300 + macdPanelHeight + macdGap;
   const padLeft = 14;
   const padRight = 76;
   const padTop = 14;
-  const padBottom = 28;
-  const volHeight = 42;
+  const padBottom = 26;
+  const volHeight = 38;
+  const priceBlockBottom = height - padBottom - macdPanelHeight - macdGap;
   const plotWidth = width - padLeft - padRight;
-  const plotHeight = height - padTop - padBottom - volHeight - 6;
+  const plotHeight = priceBlockBottom - padTop - volHeight - 6;
 
   const n = series.candles.length;
   const stepX = plotWidth / n;
@@ -181,8 +213,22 @@ export function CandlestickChart({
     return padTop + (1 - ratio) * plotHeight;
   };
 
+  const macdTop = priceBlockBottom + macdGap;
+  const macdZeroY = macdTop + macdPanelHeight / 2;
+  const yMacdAt = (val: number) => {
+    const half = (macdPanelHeight - 10) / 2;
+    return macdZeroY - (val / series.maxAbsMacd) * half;
+  };
+
   const sma50Path = buildPolylinePath(series.sma50, xAt, yAt);
   const sma200Path = buildPolylinePath(series.sma200, xAt, yAt);
+  const macdLinePath = showMacdPanel
+    ? buildPolylinePath(series.macdLine, xAt, yMacdAt)
+    : '';
+  const macdSignalPath = showMacdPanel
+    ? buildPolylinePath(series.macdSignal, xAt, yMacdAt)
+    : '';
+
   const bandSeries =
     bandTarget === 'SMA50'
       ? series.sma50
@@ -205,6 +251,8 @@ export function CandlestickChart({
   const activeSma50 = series.sma50[activeIdx];
   const activeSma200 = series.sma200[activeIdx];
   const activeRsi = series.rsi[activeIdx];
+  const activeMacd = series.macdLine[activeIdx];
+  const activeSignal = series.macdSignal[activeIdx];
 
   const xAxisIndexes = Array.from(
     new Set([0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1])
@@ -214,7 +262,7 @@ export function CandlestickChart({
     <div className="border border-[#E2E8F0] rounded-lg bg-white p-4 space-y-3">
       {/* Cabecera de gráfico con leyenda e interruptores */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono tabular-nums">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums">
           <span className="font-sans font-semibold text-xs text-[#0F172A]">
             Gráfico OHLC · {formatDateLabel(activeCandle.timestamp, timeframe)}
           </span>
@@ -239,6 +287,11 @@ export function CandlestickChart({
           {activeRsi !== null && (
             <span className="text-[#334155]">
               RSI {activeRsi.toFixed(1)}
+            </span>
+          )}
+          {activeMacd !== null && activeSignal !== null && (
+            <span className="text-[#0F766E]">
+              MACD {activeMacd.toFixed(2)} / {activeSignal.toFixed(2)}
             </span>
           )}
         </div>
@@ -283,6 +336,18 @@ export function CandlestickChart({
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setShowMacdPanel((prev) => !prev)}
+            className={`px-2.5 py-0.5 rounded-md border font-medium transition-colors ${
+              showMacdPanel
+                ? 'bg-[#F0FDFA] border-[#99F6E4] text-[#0F766E]'
+                : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B] hover:text-[#0F172A]'
+            }`}
+          >
+            Panel MACD
+          </button>
         </div>
       </div>
 
@@ -290,9 +355,9 @@ export function CandlestickChart({
       <div className="w-full overflow-hidden">
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          className="w-full h-[260px] sm:h-[300px] select-none"
+          className={`w-full select-none ${showMacdPanel ? 'h-[310px] sm:h-[360px]' : 'h-[260px] sm:h-[300px]'}`}
           role="img"
-          aria-label="Gráfico interactivo de velas OHLC con medias móviles SMA 50 y SMA 200"
+          aria-label="Gráfico interactivo de velas OHLC con medias móviles SMA 50, SMA 200 y MACD"
           onMouseLeave={() => setHoverIdx(null)}
           onMouseMove={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -342,7 +407,7 @@ export function CandlestickChart({
             const x = xAt(idx);
             const isUp = c.close >= c.open;
             const barH = Math.max(1, (c.volume / series.maxVol) * volHeight);
-            const yTop = height - padBottom - barH;
+            const yTop = priceBlockBottom - barH;
             return (
               <rect
                 key={`v-${idx}`}
@@ -407,6 +472,84 @@ export function CandlestickChart({
               strokeWidth="1.8"
               strokeLinejoin="round"
             />
+          )}
+
+          {/* Sub-panel MACD (12, 26, 9) */}
+          {showMacdPanel && (
+            <g>
+              <line
+                x1={padLeft}
+                y1={macdTop - 4}
+                x2={width - padRight}
+                y2={macdTop - 4}
+                stroke="#E2E8F0"
+                strokeWidth="1"
+              />
+              <line
+                x1={padLeft}
+                y1={macdZeroY}
+                x2={width - padRight}
+                y2={macdZeroY}
+                stroke="#CBD5E1"
+                strokeWidth="1"
+                strokeDasharray="2 2"
+              />
+              <text
+                x={width - padRight + 6}
+                y={macdTop + 10}
+                fontSize="9"
+                fontFamily="JetBrains Mono, monospace"
+                fill="#0F766E"
+              >
+                MACD
+              </text>
+              <text
+                x={width - padRight + 6}
+                y={macdZeroY + 3}
+                fontSize="9"
+                fontFamily="JetBrains Mono, monospace"
+                fill="#64748B"
+              >
+                0.00
+              </text>
+
+              {series.macdHist.map((h, idx) => {
+                if (h === null || !Number.isFinite(h)) return null;
+                const x = xAt(idx);
+                const yVal = yMacdAt(h);
+                const barY = h >= 0 ? yVal : macdZeroY;
+                const barH = Math.max(1, Math.abs(yVal - macdZeroY));
+                return (
+                  <rect
+                    key={`mh-${idx}`}
+                    x={x - bodyWidth / 2}
+                    y={barY}
+                    width={bodyWidth}
+                    height={barH}
+                    fill={h >= 0 ? 'rgba(16, 185, 129, 0.45)' : 'rgba(239, 68, 68, 0.45)'}
+                  />
+                );
+              })}
+
+              {macdSignalPath && (
+                <path
+                  d={macdSignalPath}
+                  fill="none"
+                  stroke="#F59E0B"
+                  strokeWidth="1.4"
+                  strokeLinejoin="round"
+                />
+              )}
+              {macdLinePath && (
+                <path
+                  d={macdLinePath}
+                  fill="none"
+                  stroke="#0F766E"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+              )}
+            </g>
           )}
 
           {/* Crosshair al pasar el ratón */}

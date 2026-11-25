@@ -212,6 +212,11 @@ function mapYahooResponseToStockResult(
     atr14: evalOutput.atr14,
     atrDistance50: evalOutput.atrDistance50,
     atrDistance200: evalOutput.atrDistance200,
+    macdLine: evalOutput.macdLine,
+    macdSignal: evalOutput.macdSignal,
+    macdHistogram: evalOutput.macdHistogram,
+    isMacdBullishCross: evalOutput.isMacdBullishCross,
+    isMacdBullish: evalOutput.isMacdBullish,
     isGoldenCross: evalOutput.isGoldenCross,
     backtest: evalOutput.backtest,
     candles: validCandles,
@@ -249,6 +254,7 @@ export default function App() {
   const [selectedSector, setSelectedSector] = useState<string>('ALL');
   const [showAllTickers, setShowAllTickers] = useState<boolean>(false);
   const [onlyGoldenCross, setOnlyGoldenCross] = useState<boolean>(false);
+  const [onlyMacdCross, setOnlyMacdCross] = useState<boolean>(false);
   const [minVolumeFilter, setMinVolumeFilter] = useState<MinVolumeFilter>(0);
   const [rsiFilter, setRsiFilter] = useState<RsiFilterMode>('ALL');
   const [maxAtrFilter, setMaxAtrFilter] = useState<MaxAtrDistanceFilter>(0);
@@ -411,6 +417,9 @@ export default function App() {
       if (onlyGoldenCross && !row.isGoldenCross) {
         return false;
       }
+      if (onlyMacdCross && !row.isMacdBullishCross) {
+        return false;
+      }
       if (minVolumeFilter > 0 && row.volumeRatio < minVolumeFilter) {
         return false;
       }
@@ -485,6 +494,12 @@ export default function App() {
           comparison = valA - valB;
           break;
         }
+        case 'macd': {
+          const valA = a.macdHistogram ?? -Number.MAX_SAFE_INTEGER;
+          const valB = b.macdHistogram ?? -Number.MAX_SAFE_INTEGER;
+          comparison = valA - valB;
+          break;
+        }
         case 'atrDistance': {
           const valA =
             getMinRelevantAtrDistance(a, smaFilter) ?? Number.MAX_SAFE_INTEGER;
@@ -506,6 +521,7 @@ export default function App() {
     searchQuery,
     selectedSector,
     onlyGoldenCross,
+    onlyMacdCross,
     minVolumeFilter,
     rsiFilter,
     maxAtrFilter,
@@ -664,6 +680,7 @@ export default function App() {
     setSmaFilter('ALL');
     setProximityThresholdPct(1.5);
     setOnlyGoldenCross(false);
+    setOnlyMacdCross(false);
     setMinVolumeFilter(0);
     setRsiFilter('ALL');
     setMaxAtrFilter(0);
@@ -695,6 +712,10 @@ export default function App() {
       'SMA 200',
       'Dist. SMA 200 %',
       'RSI 14',
+      'MACD (12,26,9)',
+      'MACD Senal',
+      'MACD Histograma',
+      'Cruce MACD',
       'ATR 14',
       'Dist. ATR SMA50',
       'Dist. ATR SMA200',
@@ -717,6 +738,10 @@ export default function App() {
       fmtEs(r.sma200),
       fmtEs(r.distanceSma200Pct),
       fmtEs(r.rsi14),
+      fmtEs(r.macdLine),
+      fmtEs(r.macdSignal),
+      fmtEs(r.macdHistogram),
+      r.isMacdBullishCross ? 'CRUCE AL ALZA' : r.isMacdBullish ? 'ALCISTA' : 'BAJISTA',
       fmtEs(r.atr14),
       fmtEs(r.atrDistance50),
       fmtEs(r.atrDistance200),
@@ -867,6 +892,11 @@ export default function App() {
               onlyGoldenCross={onlyGoldenCross}
               onToggleGoldenCross={(val) => {
                 setOnlyGoldenCross(val);
+                setCurrentPage(1);
+              }}
+              onlyMacdCross={onlyMacdCross}
+              onToggleMacdCross={(val) => {
+                setOnlyMacdCross(val);
                 setCurrentPage(1);
               }}
               minVolumeFilter={minVolumeFilter}

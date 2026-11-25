@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SMA_SHORT_PERIOD = 50
 SMA_LONG_PERIOD = 200
@@ -10,6 +10,9 @@ SMA_HISTORY_LOOKBACK = 15
 BOUNCE_TOUCH_TOLERANCE = 1.002
 RSI_DEFAULT_PERIOD = 14
 ATR_DEFAULT_PERIOD = 14
+MACD_FAST_PERIOD = 12
+MACD_SLOW_PERIOD = 26
+MACD_SIGNAL_PERIOD = 9
 
 
 @dataclass
@@ -67,6 +70,11 @@ class SmaEvaluation:
     atr_14: Optional[float]
     atr_distance_50: Optional[float]
     atr_distance_200: Optional[float]
+    macd_line: Optional[float]
+    macd_signal: Optional[float]
+    macd_histogram: Optional[float]
+    is_macd_bullish_cross: bool
+    is_macd_bullish: bool
     is_golden_cross: bool
     backtest: PullbackBacktestStats
 
@@ -133,6 +141,63 @@ def calculate_sma_series(closes: List[float], period: int) -> List[Optional[floa
         if i >= period - 1:
             result[i] = rolling_sum / period
     return result
+
+
+def calculate_ema_series(values: List[float], period: int) -> List[Optional[float]]:
+    """Calcula la Media Móvil Exponencial (EMA) inicializada con SMA sobre los primeros `period` valores."""
+    n = len(values)
+    result: List[Optional[float]] = [None] * n
+    if period <= 0 or n < period:
+        return result
+
+    ema = sum(values[:period]) / period
+    result[period - 1] = ema
+    multiplier = 2.0 / (period + 1)
+
+    for i in range(period, n):
+        ema = (values[i] - ema) * multiplier + ema
+        result[i] = ema
+    return result
+
+
+def calculate_macd_series(
+    closes: List[float],
+    fast_period: int = MACD_FAST_PERIOD,
+    slow_period: int = MACD_SLOW_PERIOD,
+    signal_period: int = MACD_SIGNAL_PERIOD,
+) -> Tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]]]:
+    """Calcula las series de MACD (12, 26, 9): Línea MACD, Línea Señal e Histograma."""
+    n = len(closes)
+    macd_line: List[Optional[float]] = [None] * n
+    signal_line: List[Optional[float]] = [None] * n
+    histogram: List[Optional[float]] = [None] * n
+
+    if n < slow_period + signal_period:
+        return macd_line, signal_line, histogram
+
+    ema_fast = calculate_ema_series(closes, fast_period)
+    ema_slow = calculate_ema_series(closes, slow_period)
+
+    valid_macd: List[float] = []
+    valid_indexes: List[int] = []
+    for i in range(n):
+        f = ema_fast[i]
+        s = ema_slow[i]
+        if f is not None and s is not None:
+            diff = f - s
+            macd_line[i] = diff
+            valid_macd.append(diff)
+            valid_indexes.append(i)
+
+    signal_valid = calculate_ema_series(valid_macd, signal_period)
+    for j, orig_idx in enumerate(valid_indexes):
+        sig = signal_valid[j]
+        macd_val = macd_line[orig_idx]
+        if sig is not None and macd_val is not None:
+            signal_line[orig_idx] = sig
+            histogram[orig_idx] = macd_val - sig
+
+    return macd_line, signal_line, histogram
 
 
 def calculate_sma_last_candles(
@@ -376,7 +441,7 @@ def evaluate_pullback_signals(
     short_period: int = SMA_SHORT_PERIOD,
     long_period: int = SMA_LONG_PERIOD,
 ) -> SmaEvaluation:
-    """Evalúa limpiado OHLC, SMA 50/200, RSI(14), ATR(14), Golden Cross y Backtest rápido."""
+    """Evalúa limpiado OHLC, SMA 50/200, RSI(14), ATR(14), MACD(12,26,9), Golden Cross y Backtest rápido."""
     valid_candles = sanitize_candles(raw_candles)
     if not valid_candles:
         empty = _empty_diagnostics()
@@ -396,6 +461,11 @@ def evaluate_pullback_signals(
             atr_14=None,
             atr_distance_50=None,
             atr_distance_200=None,
+            macd_line=None,
+            macd_signal=None,
+            macd_histogram=None,
+            is_macd_bullish_cross=False,
+            is_macd_bullish=False,
             is_golden_cross=False,
             backtest=PullbackBacktestStats(
                 evaluated_bars=0,
@@ -415,6 +485,28 @@ def evaluate_pullback_signals(
 
     rsi_14 = calculate_rsi_14(closes, RSI_DEFAULT_PERIOD)
     atr_14 = calculate_atr_14(valid_candles, ATR_DEFAULT_PERIOD)
+
+    macd_series, sig_series, hist_series = calculate_macd_series(
+        closes, MACD_FAST_PERIOD, MACD_SLOW_PERIOD, MACD_SIGNAL_PERIOD
+    )
+    n = len(closes)
+    macd_line = macd_series[-1] if n >= 1 else None
+    macd_signal = sig_series[-1] if n >= 1 else None
+    macd_histogram = hist_series[-1] if n >= 1 else None
+    prev_macd = macd_series[-2] if n >= 2 else None
+    prev_signal = sig_series[-2] if n >= 2 else None
+
+    is_macd_bullish_cross = (
+        macd_line is not None
+        and macd_signal is not None
+        and prev_macd is not None
+        and prev_signal is not None
+        and prev_macd <= prev_signal
+        and macd_line > macd_signal
+    )
+    is_macd_bullish = (
+        macd_line is not None and macd_signal is not None and macd_line > macd_signal
+    )
 
     sma_50 = diag_50.sma_current
     sma_200 = diag_200.sma_current
@@ -439,6 +531,11 @@ def evaluate_pullback_signals(
         atr_14=atr_14,
         atr_distance_50=atr_dist_50,
         atr_distance_200=atr_dist_200,
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_histogram=macd_histogram,
+        is_macd_bullish_cross=is_macd_bullish_cross,
+        is_macd_bullish=is_macd_bullish,
         is_golden_cross=is_golden_cross,
         backtest=backtest,
     )

@@ -49,6 +49,8 @@ interface ScannerControlsProps {
   // Filtros técnicos avanzados
   onlyGoldenCross: boolean;
   onToggleGoldenCross: (val: boolean) => void;
+  onlyMacdCross: boolean;
+  onToggleMacdCross: (val: boolean) => void;
   minVolumeFilter: MinVolumeFilter;
   onMinVolumeFilterChange: (val: MinVolumeFilter) => void;
   rsiFilter: RsiFilterMode;
@@ -93,6 +95,8 @@ export function ScannerControls({
   onToggleShowAllTickers,
   onlyGoldenCross,
   onToggleGoldenCross,
+  onlyMacdCross,
+  onToggleMacdCross,
   minVolumeFilter,
   onMinVolumeFilterChange,
   rsiFilter,
@@ -485,6 +489,18 @@ export function ScannerControls({
           }`}
         >
           Golden Cross (SMA 50 &gt; 200)
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onToggleMacdCross(!onlyMacdCross)}
+          className={`px-3 py-1.5 rounded-lg border font-medium transition-colors whitespace-nowrap ${
+            onlyMacdCross
+              ? 'bg-[#ECFDF5] border-[#A7F3D0] text-[#059669]'
+              : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#475569] hover:text-[#0F172A]'
+          }`}
+        >
+          Cruce MACD (al alza)
         </button>
 
         <label className="inline-flex items-center gap-2 text-[#475569]">

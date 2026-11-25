@@ -11,12 +11,15 @@ import streamlit as st
 
 try:
     import plotly.graph_objects as go  # type: ignore
+    from plotly.subplots import make_subplots  # type: ignore
 except ImportError:
     go = None
+    make_subplots = None
 
 from streamlit_core.indicators import (
     SMA_LONG_PERIOD,
     SMA_SHORT_PERIOD,
+    calculate_macd_series,
     calculate_sma_series,
     evaluate_pullback_signals,
     sanitize_candles,
@@ -235,6 +238,11 @@ def evaluate_cached_market(
                 "atr_14": eval_out.atr_14,
                 "atr_dist_50": eval_out.atr_distance_50,
                 "atr_dist_200": eval_out.atr_distance_200,
+                "macd_line": eval_out.macd_line,
+                "macd_signal": eval_out.macd_signal,
+                "macd_histogram": eval_out.macd_histogram,
+                "is_macd_bullish_cross": eval_out.is_macd_bullish_cross,
+                "is_macd_bullish": eval_out.is_macd_bullish,
                 "is_golden_cross": eval_out.is_golden_cross,
                 "backtest": eval_out.backtest,
                 "candles": valid_candles,
@@ -279,6 +287,10 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
         "SMA 200",
         "Dist. SMA 200 %",
         "RSI 14",
+        "MACD (12,26,9)",
+        "MACD Senal",
+        "MACD Histograma",
+        "Cruce MACD",
         "ATR 14",
         "Golden Cross",
         "Volumen Relativo",
@@ -287,6 +299,11 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
     ]
     lines = [";".join(headers)]
     for r in rows:
+        macd_status = (
+            "CRUCE AL ALZA"
+            if r["is_macd_bullish_cross"]
+            else ("ALCISTA" if r["is_macd_bullish"] else "BAJISTA")
+        )
         lines.append(
             ";".join(
                 [
@@ -302,6 +319,10 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
                     fmt_es(r["sma_200"]),
                     fmt_es(r["dist_200"]),
                     fmt_es(r["rsi_14"]),
+                    fmt_es(r["macd_line"]),
+                    fmt_es(r["macd_signal"]),
+                    fmt_es(r["macd_histogram"]),
+                    macd_status,
                     fmt_es(r["atr_14"]),
                     "SI" if r["is_golden_cross"] else "NO",
                     fmt_es(r["volume_ratio"]),
@@ -323,18 +344,28 @@ def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
     closes = [c.close for c in candles]
     sma50_all = calculate_sma_series(closes, SMA_SHORT_PERIOD)
     sma200_all = calculate_sma_series(closes, SMA_LONG_PERIOD)
+    macd_all, sig_all, hist_all = calculate_macd_series(closes)
 
     tail = min(100, len(candles))
     sl_candles = candles[-tail:]
     sl_sma50 = sma50_all[-tail:]
     sl_sma200 = sma200_all[-tail:]
+    sl_macd = macd_all[-tail:]
+    sl_sig = sig_all[-tail:]
+    sl_hist = hist_all[-tail:]
     dates = [
         datetime.fromtimestamp(c.timestamp / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
         for c in sl_candles
     ]
 
-    if go is not None:
-        fig = go.Figure()
+    if go is not None and make_subplots is not None:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.06,
+            row_heights=[0.72, 0.28],
+        )
         fig.add_trace(
             go.Candlestick(
                 x=dates,
@@ -345,7 +376,9 @@ def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
                 name=target["ticker"],
                 increasing_line_color="#10B981",
                 decreasing_line_color="#EF4444",
-            )
+            ),
+            row=1,
+            col=1,
         )
         fig.add_trace(
             go.Scatter(
@@ -354,7 +387,9 @@ def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
                 mode="lines",
                 name="SMA 50",
                 line=dict(color="#1D4ED8", width=1.8),
-            )
+            ),
+            row=1,
+            col=1,
         )
         fig.add_trace(
             go.Scatter(
@@ -363,10 +398,47 @@ def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
                 mode="lines",
                 name="SMA 200",
                 line=dict(color="#4338CA", width=1.8),
-            )
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Bar(
+                x=dates,
+                y=sl_hist,
+                name="Histograma MACD",
+                marker_color=[
+                    "rgba(16, 185, 129, 0.5)" if (v is not None and v >= 0) else "rgba(239, 68, 68, 0.5)"
+                    for v in sl_hist
+                ],
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=sl_macd,
+                mode="lines",
+                name="MACD (12,26)",
+                line=dict(color="#0F766E", width=1.6),
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=sl_sig,
+                mode="lines",
+                name="Señal (9)",
+                line=dict(color="#F59E0B", width=1.4),
+            ),
+            row=2,
+            col=1,
         )
         fig.update_layout(
-            height=380,
+            height=480,
             margin=dict(l=10, r=10, t=24, b=10),
             xaxis_rangeslider_visible=False,
             template="plotly_white",
@@ -533,10 +605,13 @@ def main() -> None:
             stop_clicked = st.button("Detener", use_container_width=True)
 
         # Tercera fila: Filtros Técnicos Avanzados
-        f_gc, f_vol, f_rsi, f_atr = st.columns([1.2, 1.2, 1.3, 1.2])
+        f_gc, f_macd, f_vol, f_rsi, f_atr = st.columns([1.1, 1.1, 1.1, 1.2, 1.1])
         with f_gc:
             st.write("")
             only_golden_cross = st.checkbox("Golden Cross (SMA 50 > 200)", value=False, key="only_gc")
+        with f_macd:
+            st.write("")
+            only_macd_cross = st.checkbox("Cruce MACD (al alza)", value=False, key="only_macd_cross")
         with f_vol:
             min_vol_label = st.selectbox(
                 "Volumen Rel. Mínimo",
@@ -647,6 +722,8 @@ def main() -> None:
                     continue
                 if only_golden_cross and not r["is_golden_cross"]:
                     continue
+                if only_macd_cross and not r["is_macd_bullish_cross"]:
+                    continue
                 if min_vol_val > 0 and r["volume_ratio"] < min_vol_val:
                     continue
                 if rsi_filter_label.startswith("RSI < 55"):
@@ -730,6 +807,14 @@ def main() -> None:
                             ),
                             "Banda 200": build_centered_microbar(r["dist_200"], float(proximity_threshold)),
                             "RSI 14": r["rsi_14"],
+                            "MACD": r["macd_line"],
+                            "Cruce MACD": (
+                                "Cruce ↑"
+                                if r["is_macd_bullish_cross"]
+                                else ("Alcista" if r["is_macd_bullish"] else "Bajista")
+                            )
+                            if r["macd_line"] is not None
+                            else "—",
                             "Dist. ATR": (
                                 f"{r['display_atr_dist']:+.2f}" if r["display_atr_dist"] is not None else "—"
                             ),
@@ -751,6 +836,13 @@ def main() -> None:
                         return "color: #059669; font-weight: 600;" if num >= 0 else "color: #D97706; font-weight: 600;"
                     return ""
 
+                def _color_macd_cross(val: Any) -> str:
+                    if val == "Cruce ↑":
+                        return "color: #059669; font-weight: 700;"
+                    if val == "Alcista":
+                        return "color: #1D4ED8; font-weight: 600;"
+                    return "color: #64748B;"
+
                 def _color_media(val: Any) -> str:
                     if val == "Confluencia 50 + 200":
                         return "background-color: #FEF3C7; color: #B45309; font-weight: 600;"
@@ -768,10 +860,12 @@ def main() -> None:
                             "SMA 50": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
                             "SMA 200": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
                             "RSI 14": lambda x: f"{x:.1f}" if pd.notna(x) else "—",
+                            "MACD": lambda x: f"{x:+.2f}" if pd.notna(x) else "—",
                             "Vol. Rel.": "{:.2f}x",
                         }
                     )
                     .map(_color_dist, subset=["Dist. SMA 50", "Dist. SMA 200"])
+                    .map(_color_macd_cross, subset=["Cruce MACD"])
                     .map(_color_media, subset=["Media Objetivo"])
                 )
 
@@ -815,11 +909,17 @@ def main() -> None:
                     wl_action_col1, wl_action_col2 = st.columns([3, 1])
                     with wl_action_col1:
                         rsi_txt = f"{target['rsi_14']:.1f}" if target["rsi_14"] is not None else "—"
+                        macd_txt = (
+                            f"{target['macd_line']:+.2f} / Señal {target['macd_signal']:+.2f} "
+                            f"({'Cruce ↑' if target['is_macd_bullish_cross'] else ('Alcista' if target['is_macd_bullish'] else 'Bajista')})"
+                            if target["macd_line"] is not None and target["macd_signal"] is not None
+                            else "—"
+                        )
                         atr_txt = f"{target['atr_14']:.2f}" if target["atr_14"] is not None else "—"
                         gc_txt = "Sí (SMA 50 > 200)" if target["is_golden_cross"] else "No"
                         st.write(
                             f"**{target['ticker']} — {target['name']}** | Velas válidas: `{target['valid_candles']}` | "
-                            f"RSI(14): `{rsi_txt}` · ATR(14): `{atr_txt}` · Golden Cross: `{gc_txt}`"
+                            f"RSI(14): `{rsi_txt}` · MACD: `{macd_txt}` · ATR(14): `{atr_txt}` · Golden Cross: `{gc_txt}`"
                         )
                     with wl_action_col2:
                         in_wl = target["ticker"] in st.session_state.watchlist_tickers

@@ -255,8 +255,8 @@ export function StockDetailDrawer({
         </div>
       </div>
 
-      {/* Métricas principales + RSI(14) + ATR(14) */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      {/* Métricas principales + RSI(14) + MACD(12,26,9) + ATR(14) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
           <span className="block text-[11px] font-medium text-[#64748B]">Precio actual</span>
           <span className="block text-base font-mono font-semibold text-[#0F172A] tabular-nums">
@@ -298,6 +298,30 @@ export function StockDetailDrawer({
         </div>
 
         <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
+          <span className="block text-[11px] font-medium text-[#64748B]">MACD (12, 26, 9)</span>
+          <span
+            className={`block text-base font-mono font-semibold tabular-nums ${
+              stock.isMacdBullishCross ? 'text-[#059669]' : 'text-[#0F172A]'
+            }`}
+          >
+            {stock.macdLine !== null
+              ? `${stock.macdLine >= 0 ? '+' : ''}${stock.macdLine.toFixed(2)}`
+              : '—'}
+          </span>
+          <span className="block text-[11px] text-[#64748B] font-mono tabular-nums">
+            {stock.macdSignal !== null
+              ? `Señal ${stock.macdSignal.toFixed(2)} · ${
+                  stock.isMacdBullishCross
+                    ? 'Cruce al alza'
+                    : stock.isMacdBullish
+                      ? 'Alcista'
+                      : 'Bajista'
+                }`
+              : 'Sin historial'}
+          </span>
+        </div>
+
+        <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
           <span className="block text-[11px] font-medium text-[#64748B]">ATR (14) &amp; Vol.</span>
           <span className="block text-base font-mono font-semibold text-[#0F172A] tabular-nums">
             {formatCurrency(stock.atr14, stock.currencySymbol)}
@@ -307,7 +331,7 @@ export function StockDetailDrawer({
           </span>
         </div>
 
-        <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1 col-span-2 sm:col-span-1">
+        <div className="p-3.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg space-y-1">
           <span className="block text-[11px] font-medium text-[#64748B]">Diagnóstico</span>
           <span className="block text-xs font-medium text-[#0F172A] leading-snug">
             {stock.signalSummary}
