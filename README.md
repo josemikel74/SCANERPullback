@@ -11,7 +11,7 @@ El repositorio es **100% dual-compatible**:
 ## Características Principales
 
 - **Fuente Única de Verdad (`data/tickers.json`)**: Los **580 valores oficiales** (35 del IBEX 35 con `.MC`, 40 del DAX 40 con `.DE` y 505 del S&P 500) son compartidos exactamente entre TypeScript y Python, incluyendo soporte para **Europa (75)**.
-- **Ventana WATCHLIST en Pantalla Principal**: Sección permanente de seguimiento con persistencia en `localStorage`, sincronización en vivo con el caché multi-mercado (Precio, Var. %, Dist. SMA 50/200, MACD, RSI 14 y estado de pullback), alta/baja instantánea con `★`, escaneo directo e importación/exportación JSON/TXT (incluyendo prefijos `BME:`/`XETR:`).
+- **Ventana WATCHLIST Interactiva en Pantalla Principal**: Sección permanente de seguimiento con persistencia en `localStorage`, sincronización en vivo con el caché multi-mercado (Precio, Var. %, Dist. SMA 50/200, MACD, RSI 14 y estado de pullback), **visor de gráfico OHLC en tiempo real con SMA 50/200, MACD (12, 26, 9), RSI (14) y ATR (14)** por cada acción de la lista (con carga individual bajo demanda), alta/baja instantánea con `★`, escaneo directo e importación/exportación JSON/TXT (incluyendo prefijos `BME:`/`XETR:`).
 - **Gráfico Interactivo OHLC + SMA 50 / SMA 200 + MACD**: Visualizador SVG responsivo sin dependencias externas en React (y Plotly en Streamlit) con banda sombreada `±umbral%`, volumen inferior, panel **MACD (12, 26, 9)** y tooltip *crosshair* con **RSI (14)** y **MACD**.
 - **Filtros Técnicos Avanzados (en memoria, sin peticiones extra)**:
   - **Golden Cross**: Filtra valores con `SMA 50 > SMA 200`.
@@ -21,9 +21,10 @@ El repositorio es **100% dual-compatible**:
   - **ATR (14)** de Wilder y **Distancia Normalizada en ATR** `(Cierre - SMA) / ATR(14)`.
   - **Volumen Relativo mínimo** sobre media de 20 velas (`≥ 1,2x`, `≥ 1,5x`, `≥ 2,0x`).
 - **Backtest Histórico Rápido**: Evalúa sobre la serie histórica descargada (`2y` diaria o `5y` semanal) los rebotes previos en SMA 50 y SMA 200, calculando tasa de acierto y retorno medio a `+5` y `+10` velas.
-- **Doble Estrategia en Tiempo Real (<10 ms)**:
+- **Triple Estrategia en Tiempo Real (<10 ms)**:
   - **Modo A — Zona de Proximidad (`±%`)**: Tendencia alcista/neutra en SMA, precio previo por encima hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]`.
   - **Modo B — Toque y Rebote Estricto**: Mínimo de la vela actual o anterior `≤ SMA × 1.002` con cierre actual estrictamente superior a la media (`Close > SMA`).
+  - **Modo C — Pullback + Cruce MACD (al alza)**: Combina señal de pullback en SMA 50/200 (Modo A o Modo B) con cruce alcista confirmado del MACD `(12, 26, 9)` en la vela actual.
 - **Control Anti-Errores, Caché TTL 5 min y Exportación**:
   - Cancelación instantánea con `AbortController`, descarga por lotes controlados (`6` tickers cada `300 ms` en navegador / `yf.download` vectorizado en Streamlit), micro-barras centradas en `0.00%`, enlaces directos a Yahoo Finance, **Exportar CSV** (Excel regional español UTF-8 BOM + `;`) y **Copiar Tickers** para TradingView.
 - **Pipeline GitHub Actions (`.github/workflows/ci.yml`)**: Valida `tsc --noEmit`, `npm run build`, `py_compile`, paridad matemática y conteo de `data/tickers.json` en cada *push* o *pull request*.

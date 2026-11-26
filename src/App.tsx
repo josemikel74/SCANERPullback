@@ -28,7 +28,7 @@ import {
   saveWatchlistTickers,
   toggleWatchlistTicker,
 } from './services/watchlistService';
-import { fetchMarketBatch } from './services/yahooService';
+import { fetchMarketBatch, fetchYahooCandles } from './services/yahooService';
 import type {
   ActiveViewTab,
   MarketId,
@@ -110,7 +110,8 @@ function mapYahooResponseToStockResult(
   yahooRes: YahooChartResponse,
   tickerInfo: TickerInfo,
   market: MarketId,
-  proximityThresholdPct: number
+  proximityThresholdPct: number,
+  strategy: StrategyMode = 'PROXIMITY'
 ): StockAnalysisResult {
   const validCandles = sanitizeCandles(yahooRes.candles);
   const lastCandle =
@@ -157,20 +158,40 @@ function mapYahooResponseToStockResult(
     }
   }
 
+  const active50 =
+    strategy === 'BOUNCE'
+      ? evalOutput.bounceMatch50
+      : strategy === 'PULLBACK_MACD'
+        ? evalOutput.macdPullbackMatch50
+        : evalOutput.proximityMatch50;
+  const active200 =
+    strategy === 'BOUNCE'
+      ? evalOutput.bounceMatch200
+      : strategy === 'PULLBACK_MACD'
+        ? evalOutput.macdPullbackMatch200
+        : evalOutput.proximityMatch200;
+
   let matchedSma: StockAnalysisResult['matchedSma'] = null;
-  if (
-    (evalOutput.proximityMatch50 || evalOutput.bounceMatch50) &&
-    (evalOutput.proximityMatch200 || evalOutput.bounceMatch200)
-  ) {
+  if (active50 && active200) {
     matchedSma = 'BOTH';
-  } else if (evalOutput.proximityMatch50 || evalOutput.bounceMatch50) {
+  } else if (active50) {
     matchedSma = 'SMA50';
-  } else if (evalOutput.proximityMatch200 || evalOutput.bounceMatch200) {
+  } else if (active200) {
     matchedSma = 'SMA200';
   }
 
   let signalSummary = 'Fuera de rango de pullback';
-  if (evalOutput.bounceMatch50 && evalOutput.bounceMatch200) {
+  if (strategy === 'PULLBACK_MACD') {
+    if (evalOutput.macdPullbackMatch50 && evalOutput.macdPullbackMatch200) {
+      signalSummary = 'Modo C · Pullback en confluencia SMA 50/200 + Cruce al alza MACD';
+    } else if (evalOutput.macdPullbackMatch50) {
+      signalSummary = 'Modo C · Pullback en SMA 50 + Cruce al alza MACD';
+    } else if (evalOutput.macdPullbackMatch200) {
+      signalSummary = 'Modo C · Pullback en SMA 200 + Cruce al alza MACD';
+    } else if (evalOutput.isMacdBullishCross) {
+      signalSummary = 'Cruce al alza MACD (sin pullback en SMA 50/200)';
+    }
+  } else if (evalOutput.bounceMatch50 && evalOutput.bounceMatch200) {
     signalSummary = 'Toque y rebote estricto en confluencia SMA 50/200';
   } else if (evalOutput.bounceMatch50) {
     signalSummary = 'Toque y rebote estricto confirmado en SMA 50';
@@ -212,6 +233,8 @@ function mapYahooResponseToStockResult(
     isProximityMatch200: evalOutput.proximityMatch200,
     isBounceMatch50: evalOutput.bounceMatch50,
     isBounceMatch200: evalOutput.bounceMatch200,
+    isMacdPullbackMatch50: evalOutput.macdPullbackMatch50,
+    isMacdPullbackMatch200: evalOutput.macdPullbackMatch200,
     diagnostics50: evalOutput.diagnostics50,
     diagnostics200: evalOutput.diagnostics200,
     rsi14: evalOutput.rsi14,
@@ -243,11 +266,23 @@ function mapYahooResponseToStockResult(
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveViewTab>('SCANNER');
 
-  // Watchlist personalizada (localStorage) y visibilidad en pantalla principal
+  // Watchlist personalizada (localStorage), visor interactivo y estado en vivo
   const [watchlistTickers, setWatchlistTickers] = useState<string[]>(() =>
     loadWatchlistTickers()
   );
   const [isWatchlistOpen, setIsWatchlistOpen] = useState<boolean>(true);
+  const [activeWatchlistTicker, setActiveWatchlistTicker] = useState<string | null>(
+    () => loadWatchlistTickers()[0] ?? null
+  );
+  const [loadingWatchlistTicker, setLoadingWatchlistTicker] = useState<string | null>(
+    null
+  );
+  const [watchlistTickerErrors, setWatchlistTickerErrors] = useState<
+    Record<string, string>
+  >({});
+  const [watchlistLiveResponses, setWatchlistLiveResponses] = useState<
+    Record<string, YahooChartResponse>
+  >({});
 
   // Controles de escaneo
   const [market, setMarket] = useState<MarketId>('IBEX35');
@@ -279,6 +314,7 @@ export default function App() {
   const [copiedCount, setCopiedCount] = useState<number | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const watchlistAbortRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
   const watchlistSet = useMemo(
@@ -293,14 +329,32 @@ export default function App() {
     }
   }, []);
 
+  const abortWatchlistFetch = useCallback(() => {
+    if (watchlistAbortRef.current) {
+      watchlistAbortRef.current.abort();
+      watchlistAbortRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     return () => {
       abortActiveScan();
+      abortWatchlistFetch();
       if (copyTimerRef.current !== null) {
         window.clearTimeout(copyTimerRef.current);
       }
     };
-  }, [abortActiveScan]);
+  }, [abortActiveScan, abortWatchlistFetch]);
+
+  useEffect(() => {
+    if (watchlistTickers.length === 0) {
+      setActiveWatchlistTicker(null);
+      return;
+    }
+    if (!activeWatchlistTicker || !watchlistTickers.includes(activeWatchlistTicker)) {
+      setActiveWatchlistTicker(watchlistTickers[0]);
+    }
+  }, [watchlistTickers, activeWatchlistTicker]);
 
   const activeUniverse = useMemo(
     () => getTickersByMarket(market, watchlistTickers),
@@ -320,14 +374,20 @@ export default function App() {
       const info = tickerInfoMap.get(res.ticker);
       if (info) {
         results.push(
-          mapYahooResponseToStockResult(res, info, market, proximityThresholdPct)
+          mapYahooResponseToStockResult(
+            res,
+            info,
+            market,
+            proximityThresholdPct,
+            strategy
+          )
         );
       }
     }
 
     const elapsed = Math.max(0.1, Number((performance.now() - start).toFixed(2)));
     return { evaluatedData: results, recalcMs: elapsed };
-  }, [rawResponses, tickerInfoMap, market, proximityThresholdPct]);
+  }, [rawResponses, tickerInfoMap, market, proximityThresholdPct, strategy]);
 
   const watchlistDisplayItems = useMemo<WatchlistDisplayItem[]>(() => {
     const currentMap = new Map<string, StockAnalysisResult>(
@@ -347,6 +407,21 @@ export default function App() {
           analysis: currentMatch,
         };
       }
+      const liveMatch = watchlistLiveResponses[`${upper}_${timeframe}`];
+      if (liveMatch) {
+        return {
+          ticker: info.ticker,
+          name: info.name,
+          sector: info.sector,
+          analysis: mapYahooResponseToStockResult(
+            liveMatch,
+            info,
+            'WATCHLIST',
+            proximityThresholdPct,
+            strategy
+          ),
+        };
+      }
       const cached = cachedMap.get(upper);
       if (cached) {
         return {
@@ -357,7 +432,8 @@ export default function App() {
             cached.response,
             info,
             cached.market,
-            proximityThresholdPct
+            proximityThresholdPct,
+            strategy
           ),
         };
       }
@@ -368,7 +444,14 @@ export default function App() {
         analysis: null,
       };
     });
-  }, [watchlistTickers, evaluatedData, timeframe, proximityThresholdPct]);
+  }, [
+    watchlistTickers,
+    evaluatedData,
+    watchlistLiveResponses,
+    timeframe,
+    proximityThresholdPct,
+    strategy,
+  ]);
 
   const selectedStock = useMemo(() => {
     if (!selectedTicker) return null;
@@ -428,9 +511,17 @@ export default function App() {
 
     for (const row of evaluatedData) {
       const match50 =
-        strategy === 'PROXIMITY' ? row.isProximityMatch50 : row.isBounceMatch50;
+        strategy === 'PROXIMITY'
+          ? row.isProximityMatch50
+          : strategy === 'PULLBACK_MACD'
+            ? row.isMacdPullbackMatch50
+            : row.isBounceMatch50;
       const match200 =
-        strategy === 'PROXIMITY' ? row.isProximityMatch200 : row.isBounceMatch200;
+        strategy === 'PROXIMITY'
+          ? row.isProximityMatch200
+          : strategy === 'PULLBACK_MACD'
+            ? row.isMacdPullbackMatch200
+            : row.isBounceMatch200;
 
       if (match50) sma50Signals += 1;
       if (match200) sma200Signals += 1;
@@ -491,9 +582,17 @@ export default function App() {
       }
 
       const match50 =
-        strategy === 'PROXIMITY' ? row.isProximityMatch50 : row.isBounceMatch50;
+        strategy === 'PROXIMITY'
+          ? row.isProximityMatch50
+          : strategy === 'PULLBACK_MACD'
+            ? row.isMacdPullbackMatch50
+            : row.isBounceMatch50;
       const match200 =
-        strategy === 'PROXIMITY' ? row.isProximityMatch200 : row.isBounceMatch200;
+        strategy === 'PROXIMITY'
+          ? row.isProximityMatch200
+          : strategy === 'PULLBACK_MACD'
+            ? row.isMacdPullbackMatch200
+            : row.isBounceMatch200;
 
       if (smaFilter === 'SMA50') return match50;
       if (smaFilter === 'SMA200') return match200;
@@ -616,11 +715,82 @@ export default function App() {
 
   const handleTimeframeChange = (nextTimeframe: Timeframe) => {
     abortActiveScan();
+    abortWatchlistFetch();
+    setLoadingWatchlistTicker(null);
     setTimeframe(nextTimeframe);
     setSelectedTicker(null);
     setCurrentPage(1);
     hydrateFromCacheOrReset(market, nextTimeframe);
   };
+
+  const handleInspectWatchlistTicker = useCallback(
+    async (ticker: string, forceRefresh = false) => {
+      const upper = ticker.toUpperCase();
+      setActiveWatchlistTicker(upper);
+      setIsWatchlistOpen(true);
+
+      const cacheKey = `${upper}_${timeframe}`;
+      const inEvaluated = evaluatedData.some(
+        (r) => r.ticker.toUpperCase() === upper && r.timeframe === timeframe
+      );
+      const inLive = Boolean(watchlistLiveResponses[cacheKey]);
+      const cachedHit = getCachedResponsesForTickers([upper], timeframe).get(upper);
+      const inMarketCacheSameTf =
+        cachedHit !== undefined && cachedHit.response.timeframe === timeframe;
+
+      if (!forceRefresh && (inEvaluated || inLive || inMarketCacheSameTf)) {
+        setWatchlistTickerErrors((prev) => {
+          if (!(upper in prev)) return prev;
+          const next = { ...prev };
+          delete next[upper];
+          return next;
+        });
+        return;
+      }
+
+      abortWatchlistFetch();
+      const controller = new AbortController();
+      watchlistAbortRef.current = controller;
+
+      setLoadingWatchlistTicker(upper);
+      setWatchlistTickerErrors((prev) => {
+        if (!(upper in prev)) return prev;
+        const next = { ...prev };
+        delete next[upper];
+        return next;
+      });
+
+      try {
+        const res = await fetchYahooCandles(upper, timeframe, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setWatchlistLiveResponses((prev) => ({
+          ...prev,
+          [cacheKey]: res,
+        }));
+      } catch (err: unknown) {
+        if (
+          controller.signal.aborted ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        const message =
+          err instanceof Error ? err.message : 'Error de conexión con Yahoo Finance';
+        setWatchlistTickerErrors((prev) => ({
+          ...prev,
+          [upper]: message,
+        }));
+      } finally {
+        if (watchlistAbortRef.current === controller) {
+          watchlistAbortRef.current = null;
+          setLoadingWatchlistTicker(null);
+        }
+      }
+    },
+    [timeframe, evaluatedData, watchlistLiveResponses, abortWatchlistFetch]
+  );
 
   const handleToggleWatchlist = (ticker: string) => {
     setWatchlistTickers((prev) => {
@@ -1034,7 +1204,7 @@ export default function App() {
               />
             )}
 
-            {/* Ventana Watchlist permanente en pantalla principal */}
+            {/* Ventana Watchlist permanente e interactiva en pantalla principal */}
             <WatchlistPanel
               watchlistTickers={watchlistTickers}
               items={watchlistDisplayItems}
@@ -1042,18 +1212,19 @@ export default function App() {
               strategy={strategy}
               proximityThresholdPct={proximityThresholdPct}
               scanStatus={scanStatus}
-              selectedTicker={selectedTicker}
+              activeTicker={activeWatchlistTicker}
+              loadingTicker={loadingWatchlistTicker}
+              tickerErrors={watchlistTickerErrors}
               isOpen={isWatchlistOpen}
               onToggleOpen={() => setIsWatchlistOpen((prev) => !prev)}
               onAddTickers={handleAddWatchlistTickers}
               onRemoveTicker={handleRemoveWatchlistTicker}
               onReplaceWatchlist={handleReplaceWatchlist}
               onScanWatchlist={() => void handleStartScan('WATCHLIST')}
-              onSelectStock={(stock) =>
-                setSelectedTicker((prev) =>
-                  prev === stock.ticker ? null : stock.ticker
-                )
+              onInspectTicker={(ticker, forceRefresh) =>
+                void handleInspectWatchlistTicker(ticker, forceRefresh)
               }
+              onOpenFullDrawer={(stock) => setSelectedTicker(stock.ticker)}
             />
 
             {/* Tabla principal */}

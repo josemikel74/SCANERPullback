@@ -79,6 +79,8 @@ jobs:
           assert res.atr_14 is not None and res.atr_14 > 0.0
           assert res.macd_line is not None and res.macd_signal is not None
           assert isinstance(res.is_macd_bullish_cross, bool)
+          assert isinstance(res.macd_pullback_match_50, bool)
+          assert isinstance(res.macd_pullback_match_200, bool)
           assert len(aggregate_hourly_to_4h(candles[:8])) == 2
-          print("CI Python checks OK: 580 tickers, SMA/RSI/MACD/ATR/GoldenCross/4h verified.")
+          print("CI Python checks OK: 580 tickers, SMA/RSI/MACD/ATR/GoldenCross/ModoC/4h verified.")
           EOF

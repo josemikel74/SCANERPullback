@@ -142,6 +142,8 @@ def init_session_state() -> None:
         st.session_state.last_scan_status = "IDLE"
     if "watchlist_tickers" not in st.session_state:
         st.session_state.watchlist_tickers = list(DEFAULT_WATCHLIST)
+    if "watchlist_live_cache" not in st.session_state:
+        st.session_state.watchlist_live_cache = {}
 
 
 def get_valid_cache_entry(market_id: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -196,6 +198,26 @@ def get_cached_responses_for_watchlist(
     )
 
     found: Dict[str, tuple[Dict[str, Any], str]] = {}
+
+    # Priorizar respuestas obtenidas específicamente en tiempo real desde el visor del Watchlist
+    live_entries: List[Dict[str, Any]] = []
+    for k in list(st.session_state.watchlist_live_cache.keys()):
+        entry = st.session_state.watchlist_live_cache[k]
+        if now > entry["expires_at"]:
+            del st.session_state.watchlist_live_cache[k]
+        else:
+            live_entries.append(entry)
+
+    live_entries.sort(
+        key=lambda e: (1 if e["timeframe"] == preferred_timeframe else 0, e["cached_at"]),
+        reverse=True,
+    )
+    for entry in live_entries:
+        res = entry["response"]
+        upper = res["ticker"].upper()
+        if upper in wanted and upper not in found:
+            found[upper] = (res, "WATCHLIST")
+
     for entry in valid_entries:
         for res in entry["responses"]:
             upper = res["ticker"].upper()
@@ -262,6 +284,8 @@ def evaluate_cached_market(
                 "prox_200": eval_out.proximity_match_200,
                 "bounce_50": eval_out.bounce_match_50,
                 "bounce_200": eval_out.bounce_match_200,
+                "macd_pullback_50": eval_out.macd_pullback_match_50,
+                "macd_pullback_200": eval_out.macd_pullback_match_200,
                 "diag_50": eval_out.diagnostics_50,
                 "diag_200": eval_out.diagnostics_200,
                 "rsi_14": eval_out.rsi_14,
@@ -296,6 +320,22 @@ def get_min_atr_dist(row: Dict[str, Any], sma_filter_label: str) -> Optional[flo
     if d50 is not None and d200 is not None:
         return d50 if abs(d50) <= abs(d200) else d200
     return d50 if d50 is not None else d200
+
+
+def get_strategy_mode(label: str) -> str:
+    if label.startswith("Modo A"):
+        return "PROXIMITY"
+    if label.startswith("Modo B"):
+        return "BOUNCE"
+    return "PULLBACK_MACD"
+
+
+def get_strategy_matches(row: Dict[str, Any], strategy_mode: str) -> tuple[bool, bool]:
+    if strategy_mode == "PROXIMITY":
+        return bool(row["prox_50"]), bool(row["prox_200"])
+    if strategy_mode == "BOUNCE":
+        return bool(row["bounce_50"]), bool(row["bounce_200"])
+    return bool(row["macd_pullback_50"]), bool(row["macd_pullback_200"])
 
 
 def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: str) -> bytes:
@@ -365,7 +405,11 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
     return content.encode("utf-8")
 
 
-def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
+def render_ohlc_chart(
+    target: Dict[str, Any],
+    threshold_pct: float,
+    chart_key: Optional[str] = None,
+) -> None:
     candles = target["candles"]
     if len(candles) < 2:
         st.caption("No hay suficientes velas válidas para el gráfico.")
@@ -474,7 +518,7 @@ def render_ohlc_chart(target: Dict[str, Any], threshold_pct: float) -> None:
             template="plotly_white",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=chart_key)
     else:
         chart_df = pd.DataFrame(
             {
@@ -530,11 +574,15 @@ def main() -> None:
         with col_strat:
             strategy_label = st.radio(
                 "Estrategia de Pullback",
-                options=["Modo A: Zona de Proximidad", "Modo B: Toque y Rebote Estricto"],
+                options=[
+                    "Modo A: Zona de Proximidad",
+                    "Modo B: Toque y Rebote Estricto",
+                    "Modo C: Pullback + Cruce MACD",
+                ],
                 horizontal=True,
                 key="selected_strategy",
             )
-            is_proximity_mode = strategy_label.startswith("Modo A")
+            strategy_mode = get_strategy_mode(strategy_label)
 
         with col_sma:
             sma_filter_label = st.selectbox(
@@ -597,7 +645,6 @@ def main() -> None:
                 st.session_state.watchlist_tickers, timeframe
             )
             wl_threshold_val = float(st.session_state.get("proximity_threshold", 1.5))
-            wl_is_prox = strategy_label.startswith("Modo A")
 
             if not st.session_state.watchlist_tickers:
                 st.info("Tu Watchlist está vacía. Añade tickers arriba o desde el detalle de cualquier valor.")
@@ -610,6 +657,7 @@ def main() -> None:
                     for t in get_tickers_by_market("WATCHLIST", st.session_state.watchlist_tickers)
                 }
                 wl_table_rows: List[Dict[str, Any]] = []
+                wl_eval_by_ticker: Dict[str, Dict[str, Any]] = {}
                 for wl_t in st.session_state.watchlist_tickers:
                     u_info = wl_universe_info.get(
                         wl_t, {"ticker": wl_t, "name": wl_t, "sector": "Personalizado"}
@@ -625,13 +673,20 @@ def main() -> None:
                         )
                         if eval_rows:
                             er = eval_rows[0]
-                            m50 = er["prox_50"] if wl_is_prox else er["bounce_50"]
-                            m200 = er["prox_200"] if wl_is_prox else er["bounce_200"]
-                            sig_lbl = (
-                                "Confluencia 50+200"
-                                if (m50 and m200)
-                                else ("SMA 50" if m50 else ("SMA 200" if m200 else "Sin señal"))
-                            )
+                            wl_eval_by_ticker[wl_t.upper()] = er
+                            m50, m200 = get_strategy_matches(er, strategy_mode)
+                            if strategy_mode == "PULLBACK_MACD":
+                                sig_lbl = (
+                                    "Confluencia + MACD ↑"
+                                    if (m50 and m200)
+                                    else ("SMA 50 + MACD ↑" if m50 else ("SMA 200 + MACD ↑" if m200 else "Sin señal"))
+                                )
+                            else:
+                                sig_lbl = (
+                                    "Confluencia 50+200"
+                                    if (m50 and m200)
+                                    else ("SMA 50" if m50 else ("SMA 200" if m200 else "Sin señal"))
+                                )
                             macd_lbl = (
                                 f"{er['macd_line']:+.2f} ({'Cruce ↑' if er['is_macd_bullish_cross'] else ('Alcista' if er['is_macd_bullish'] else 'Bajista')})"
                                 if er["macd_line"] is not None
@@ -668,6 +723,105 @@ def main() -> None:
                     )
 
                 st.dataframe(pd.DataFrame(wl_table_rows), use_container_width=True, hide_index=True)
+
+                st.markdown("##### Visor Interactivo Watchlist — Gráfico en Tiempo Real e Indicadores")
+                wl_v1, wl_v2 = st.columns([2.2, 1.2])
+                with wl_v1:
+                    wl_selected = st.selectbox(
+                        "Acción de la Watchlist a visualizar",
+                        options=st.session_state.watchlist_tickers,
+                        format_func=lambda t: f"{t} — {wl_universe_info.get(t, {}).get('name', t)}",
+                        key="wl_chart_ticker_select",
+                    )
+                with wl_v2:
+                    st.write("")
+                    wl_fetch_single = st.button(
+                        f"Cargar / Actualizar gráfico ({timeframe})",
+                        use_container_width=True,
+                        key="wl_load_chart_btn",
+                    )
+
+                if wl_fetch_single and wl_selected:
+                    single_batch = fetch_market_batch([wl_selected], timeframe=timeframe)
+                    if single_batch["results"]:
+                        now_ts = time.time()
+                        st.session_state.watchlist_live_cache[f"{wl_selected.upper()}_{timeframe}"] = {
+                            "response": single_batch["results"][0],
+                            "market": "WATCHLIST",
+                            "timeframe": timeframe,
+                            "cached_at": now_ts,
+                            "expires_at": now_ts + CACHE_TTL_SECONDS,
+                        }
+                        st.rerun()
+                    elif single_batch["incidents"]:
+                        st.warning(f"No se pudo descargar {wl_selected}: {single_batch['incidents'][0]['message']}")
+
+                wl_target = wl_eval_by_ticker.get(wl_selected.upper()) if wl_selected else None
+                if wl_target:
+                    wm1, wm2, wm3, wm4, wm5, wm6 = st.columns(6)
+                    wm1.metric(
+                        f"Precio ({wl_target['currency']})",
+                        f"{wl_target['price']:.2f}",
+                        f"{wl_target['change_pct']:+.2f}%",
+                    )
+                    wm2.metric(
+                        "SMA 50",
+                        f"{wl_target['sma_50']:.2f}" if wl_target["sma_50"] is not None else "—",
+                        f"{wl_target['dist_50']:+.2f}%" if wl_target["dist_50"] is not None else None,
+                    )
+                    wm3.metric(
+                        "SMA 200",
+                        f"{wl_target['sma_200']:.2f}" if wl_target["sma_200"] is not None else "—",
+                        f"{wl_target['dist_200']:+.2f}%" if wl_target["dist_200"] is not None else None,
+                    )
+                    wm4.metric(
+                        "MACD (12,26,9)",
+                        f"{wl_target['macd_line']:+.2f}" if wl_target["macd_line"] is not None else "—",
+                        (
+                            f"Señal {wl_target['macd_signal']:+.2f} · "
+                            f"{'Cruce ↑' if wl_target['is_macd_bullish_cross'] else ('Alcista' if wl_target['is_macd_bullish'] else 'Bajista')}"
+                        )
+                        if wl_target["macd_signal"] is not None
+                        else None,
+                    )
+                    wm5.metric(
+                        "RSI (14)",
+                        f"{wl_target['rsi_14']:.1f}" if wl_target["rsi_14"] is not None else "—",
+                        (
+                            f"ATR {wl_target['atr_14']:.2f} · Vol {wl_target['volume_ratio']:.2f}x"
+                            if wl_target["atr_14"] is not None
+                            else f"Vol {wl_target['volume_ratio']:.2f}x"
+                        ),
+                    )
+                    wm50, wm200 = get_strategy_matches(wl_target, strategy_mode)
+                    if strategy_mode == "PULLBACK_MACD":
+                        w_sig = (
+                            "Confluencia + MACD ↑"
+                            if (wm50 and wm200)
+                            else ("SMA 50 + MACD ↑" if wm50 else ("SMA 200 + MACD ↑" if wm200 else "Sin señal"))
+                        )
+                    else:
+                        w_sig = (
+                            "Confluencia 50+200"
+                            if (wm50 and wm200)
+                            else ("SMA 50" if wm50 else ("SMA 200" if wm200 else "Sin señal"))
+                        )
+                    wm6.metric(
+                        "Señal Pullback",
+                        w_sig,
+                        "Golden Cross" if wl_target["is_golden_cross"] else "SMA 50 ≤ 200",
+                    )
+
+                    render_ohlc_chart(
+                        wl_target,
+                        wl_threshold_val,
+                        chart_key=f"wl_live_chart_{wl_target['ticker']}_{timeframe}",
+                    )
+                else:
+                    st.info(
+                        f"Aún no hay datos descargados para **{wl_selected}** en temporalidad **{timeframe}**. "
+                        "Pulsa **Cargar / Actualizar gráfico** o **Escanear Watchlist**."
+                    )
 
                 wl_m1, wl_m2, wl_m3, wl_m4 = st.columns([1.8, 1.0, 1.0, 0.8])
                 with wl_m1:
@@ -732,7 +886,7 @@ def main() -> None:
                 max_value=10.0,
                 value=1.5,
                 step=0.1,
-                disabled=not is_proximity_mode,
+                disabled=(strategy_mode == "BOUNCE"),
                 key="proximity_threshold",
             )
 
@@ -859,8 +1013,7 @@ def main() -> None:
             total_pullbacks = 0
 
             for r in all_rows:
-                m50 = r["prox_50"] if is_proximity_mode else r["bounce_50"]
-                m200 = r["prox_200"] if is_proximity_mode else r["bounce_200"]
+                m50, m200 = get_strategy_matches(r, strategy_mode)
                 if m50:
                     sma_50_hits += 1
                 if m200:
@@ -905,8 +1058,7 @@ def main() -> None:
                     if atr_dist is None or abs(atr_dist) > max_atr_val:
                         continue
 
-                m50 = r["prox_50"] if is_proximity_mode else r["bounce_50"]
-                m200 = r["prox_200"] if is_proximity_mode else r["bounce_200"]
+                m50, m200 = get_strategy_matches(r, strategy_mode)
 
                 if not show_all:
                     if sma_filter_label == "SMA 50" and not m50:
@@ -917,11 +1069,11 @@ def main() -> None:
                         continue
 
                 if m50 and m200:
-                    media_badge = "Confluencia 50 + 200"
+                    media_badge = "Confluencia + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "Confluencia 50 + 200"
                 elif m50:
-                    media_badge = "SMA 50"
+                    media_badge = "SMA 50 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 50"
                 elif m200:
-                    media_badge = "SMA 200"
+                    media_badge = "SMA 200 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 200"
                 else:
                     media_badge = "Sin señal"
 
@@ -1011,11 +1163,11 @@ def main() -> None:
                     return "color: #64748B;"
 
                 def _color_media(val: Any) -> str:
-                    if val == "Confluencia 50 + 200":
+                    if isinstance(val, str) and val.startswith("Confluencia"):
                         return "background-color: #FEF3C7; color: #B45309; font-weight: 600;"
-                    if val == "SMA 50":
+                    if isinstance(val, str) and val.startswith("SMA 50"):
                         return "background-color: #EFF6FF; color: #1D4ED8; font-weight: 600;"
-                    if val == "SMA 200":
+                    if isinstance(val, str) and val.startswith("SMA 200"):
                         return "background-color: #EEF2FF; color: #4338CA; font-weight: 600;"
                     return "color: #64748B;"
 
@@ -1103,7 +1255,11 @@ def main() -> None:
                                 st.session_state.watchlist_tickers = st.session_state.watchlist_tickers + [target["ticker"]]
                             st.rerun()
 
-                    render_ohlc_chart(target, float(proximity_threshold))
+                    render_ohlc_chart(
+                        target,
+                        float(proximity_threshold),
+                        chart_key=f"main_audit_chart_{target['ticker']}_{timeframe}",
+                    )
 
                     d50, d200 = target["diag_50"], target["diag_200"]
                     bt = target["backtest"]
@@ -1186,8 +1342,12 @@ def main() -> None:
               cotización previa sobre la media hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]`.
             - **Modo B — Toque y Rebote Estricto**: Exige toque o perforación leve en el mínimo de la vela actual o anterior
               (`Low <= SMA * 1.002`) viniendo de cotizar por encima hace 5–15 velas, con cierre actual estrictamente superior (`Close > SMA`).
-            - **Filtros Técnicos Avanzados**: Golden Cross (`SMA 50 > SMA 200`), RSI(14) de Wilder, distancia normalizada en ATR(14)
-              y volumen relativo mínimo sobre media de 20 velas.
+            - **Modo C — Pullback + Cruce MACD (al alza)**: Combina la señal de pullback en SMA 50/200 (Modo A o Modo B)
+              con un cruce alcista confirmado del MACD `(12, 26, 9)` (`MACD anterior ≤ Señal anterior` y `MACD actual > Señal actual`).
+            - **Visor Interactivo Watchlist**: Permite seleccionar cualquier acción de tu lista de seguimiento para visualizar
+              su gráfico OHLC en tiempo real con SMA 50/200, MACD (12, 26, 9), RSI (14) y ATR (14).
+            - **Filtros Técnicos Avanzados**: Golden Cross (`SMA 50 > SMA 200`), Cruce MACD al alza, RSI(14) de Wilder,
+              distancia normalizada en ATR(14) y volumen relativo mínimo sobre media de 20 velas.
             - **Backtest Rápido Histórico**: Mide sobre la serie descargada la tasa de acierto y retorno medio a +5 y +10 velas tras cada rebote Modo B.
             - **Fuente Única de Verdad (`data/tickers.json`)**: Los 580 tickers oficiales son compartidos entre TypeScript y Python, validados por GitHub Actions CI.
             """

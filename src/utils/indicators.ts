@@ -541,6 +541,8 @@ export function evaluatePullbackSignals(
       proximityMatch200: false,
       bounceMatch50: false,
       bounceMatch200: false,
+      macdPullbackMatch50: false,
+      macdPullbackMatch200: false,
       diagnostics50: emptyDiagnostics(),
       diagnostics200: emptyDiagnostics(),
       rsi14: null,
@@ -605,6 +607,11 @@ export function evaluatePullbackSignals(
   const isMacdBullish =
     macdLine !== null && macdSignal !== null && macdLine > macdSignal;
 
+  const macdPullbackMatch50 =
+    (eval50.proximityMatch || eval50.bounceMatch) && isMacdBullishCross;
+  const macdPullbackMatch200 =
+    (eval200.proximityMatch || eval200.bounceMatch) && isMacdBullishCross;
+
   const sma50 = eval50.diagnostics.smaCurrent;
   const sma200 = eval200.diagnostics.smaCurrent;
 
@@ -626,6 +633,8 @@ export function evaluatePullbackSignals(
     proximityMatch200: eval200.proximityMatch,
     bounceMatch50: eval50.bounceMatch,
     bounceMatch200: eval200.bounceMatch,
+    macdPullbackMatch50,
+    macdPullbackMatch200,
     diagnostics50: eval50.diagnostics,
     diagnostics200: eval200.diagnostics,
     rsi14,

@@ -63,12 +63,14 @@ function SmaDiagnosticCard({
   atrDist,
   symbol,
   proximityThresholdPct,
+  isMacdBullishCross,
 }: {
   title: string;
   diag: SmaDiagnostics;
   atrDist: number | null;
   symbol: '€' | '$';
   proximityThresholdPct: number;
+  isMacdBullishCross: boolean;
 }) {
   const withinZone =
     diag.distancePct !== null &&
@@ -121,6 +123,15 @@ function SmaDiagnosticCard({
             label="Modo B · Rebote (Cierre > SMA)"
             passed={diag.closedStrictlyAbove}
             detail={diag.closedStrictlyAbove ? 'Sobre SMA' : 'Bajo SMA'}
+          />
+          <FormulaCheckRow
+            label="Modo C · Pullback + Cruce MACD ↑"
+            passed={
+              isMacdBullishCross &&
+              (withinZone || (diag.touchedRecently && diag.closedStrictlyAbove)) &&
+              diag.wasAboveIn5To15
+            }
+            detail={isMacdBullishCross ? 'Cruce MACD ↑' : 'Sin cruce MACD'}
           />
         </div>
       )}
@@ -356,6 +367,7 @@ export function StockDetailDrawer({
           atrDist={stock.atrDistance50}
           symbol={stock.currencySymbol}
           proximityThresholdPct={proximityThresholdPct}
+          isMacdBullishCross={stock.isMacdBullishCross}
         />
         <SmaDiagnosticCard
           title="Verificación Matemática SMA 200"
@@ -363,6 +375,7 @@ export function StockDetailDrawer({
           atrDist={stock.atrDistance200}
           symbol={stock.currencySymbol}
           proximityThresholdPct={proximityThresholdPct}
+          isMacdBullishCross={stock.isMacdBullishCross}
         />
       </div>
 

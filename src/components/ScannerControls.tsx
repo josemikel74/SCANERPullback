@@ -243,12 +243,12 @@ export function ScannerControls({
           <div
             role="group"
             aria-label="Interruptor de estrategia de pullback"
-            className="inline-flex items-center p-1 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg"
+            className="inline-flex flex-wrap items-center p-1 bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg"
           >
             <button
               type="button"
               onClick={() => onStrategyChange('PROXIMITY')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
                 strategy === 'PROXIMITY'
                   ? 'bg-white text-[#0F172A] shadow-xs border border-[#E2E8F0]'
                   : 'text-[#64748B] hover:text-[#0F172A] border border-transparent'
@@ -259,7 +259,7 @@ export function ScannerControls({
             <button
               type="button"
               onClick={() => onStrategyChange('BOUNCE')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
                 strategy === 'BOUNCE'
                   ? 'bg-white text-[#0F172A] shadow-xs border border-[#E2E8F0]'
                   : 'text-[#64748B] hover:text-[#0F172A] border border-transparent'
@@ -267,9 +267,20 @@ export function ScannerControls({
             >
               Modo B: Toque y Rebote Estricto
             </button>
+            <button
+              type="button"
+              onClick={() => onStrategyChange('PULLBACK_MACD')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 ${
+                strategy === 'PULLBACK_MACD'
+                  ? 'bg-[#ECFDF5] text-[#059669] shadow-xs border border-[#A7F3D0]'
+                  : 'text-[#64748B] hover:text-[#0F172A] border border-transparent'
+              }`}
+            >
+              Modo C: Pullback + Cruce MACD
+            </button>
           </div>
 
-          {strategy === 'PROXIMITY' && (
+          {(strategy === 'PROXIMITY' || strategy === 'PULLBACK_MACD') && (
             <label className="inline-flex items-center gap-2 text-xs text-[#475569] bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg px-3 py-1.5">
               <span className="whitespace-nowrap font-medium">Rango ±</span>
               <input

@@ -64,6 +64,8 @@ class SmaEvaluation:
     proximity_match_200: bool
     bounce_match_50: bool
     bounce_match_200: bool
+    macd_pullback_match_50: bool
+    macd_pullback_match_200: bool
     diagnostics_50: SmaDiagnostics
     diagnostics_200: SmaDiagnostics
     rsi_14: Optional[float]
@@ -455,6 +457,8 @@ def evaluate_pullback_signals(
             proximity_match_200=False,
             bounce_match_50=False,
             bounce_match_200=False,
+            macd_pullback_match_50=False,
+            macd_pullback_match_200=False,
             diagnostics_50=empty,
             diagnostics_200=empty,
             rsi_14=None,
@@ -508,6 +512,9 @@ def evaluate_pullback_signals(
         macd_line is not None and macd_signal is not None and macd_line > macd_signal
     )
 
+    macd_pullback_match_50 = (prox_50 or bounce_50) and is_macd_bullish_cross
+    macd_pullback_match_200 = (prox_200 or bounce_200) and is_macd_bullish_cross
+
     sma_50 = diag_50.sma_current
     sma_200 = diag_200.sma_current
     atr_dist_50 = (current_close - sma_50) / atr_14 if (atr_14 and atr_14 > 0 and sma_50 is not None) else None
@@ -525,6 +532,8 @@ def evaluate_pullback_signals(
         proximity_match_200=prox_200,
         bounce_match_50=bounce_50,
         bounce_match_200=bounce_200,
+        macd_pullback_match_50=macd_pullback_match_50,
+        macd_pullback_match_200=macd_pullback_match_200,
         diagnostics_50=diag_50,
         diagnostics_200=diag_200,
         rsi_14=rsi_14,

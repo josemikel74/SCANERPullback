@@ -7,7 +7,7 @@ export type MarketId = 'IBEX35' | 'DAX' | 'SP500' | 'EUROPE' | 'WATCHLIST';
 
 export type Timeframe = '1h' | '4h' | '1d' | '1w';
 
-export type StrategyMode = 'PROXIMITY' | 'BOUNCE';
+export type StrategyMode = 'PROXIMITY' | 'BOUNCE' | 'PULLBACK_MACD';
 
 export type SmaFilter = 'ALL' | 'SMA50' | 'SMA200';
 
@@ -121,6 +121,8 @@ export interface StockAnalysisResult {
   isProximityMatch200: boolean;
   isBounceMatch50: boolean;
   isBounceMatch200: boolean;
+  isMacdPullbackMatch50: boolean;
+  isMacdPullbackMatch200: boolean;
   diagnostics50: SmaDiagnostics;
   diagnostics200: SmaDiagnostics;
   rsi14: number | null;
@@ -197,6 +199,8 @@ export interface SmaEvaluationOutput {
   proximityMatch200: boolean;
   bounceMatch50: boolean;
   bounceMatch200: boolean;
+  macdPullbackMatch50: boolean;
+  macdPullbackMatch200: boolean;
   diagnostics50: SmaDiagnostics;
   diagnostics200: SmaDiagnostics;
   rsi14: number | null;

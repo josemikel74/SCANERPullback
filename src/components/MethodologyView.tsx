@@ -15,7 +15,7 @@ export function MethodologyView() {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
           <div className="border border-[#E2E8F0] rounded-xl p-5 space-y-2.5 bg-[#F8FAFC]">
             <h3 className="text-sm font-bold text-[#0F172A]">
               Modo A · Zona de Proximidad (±%)
@@ -38,6 +38,18 @@ export function MethodologyView() {
               referencia (<span className="font-mono">Low ≤ SMA × 1.002</span>) viniendo de cotizar por
               encima hace 5–15 velas, y que el cierre actual recupere estrictamente por encima de la media
               (<span className="font-mono">Cierre &gt; SMA</span>).
+            </p>
+          </div>
+
+          <div className="border border-[#A7F3D0] rounded-xl p-5 space-y-2.5 bg-[#ECFDF5]/60">
+            <h3 className="text-sm font-bold text-[#0F172A]">
+              Modo C · Pullback + Cruce MACD ↑
+            </h3>
+            <p className="text-xs text-[#475569] leading-relaxed">
+              Combina la detección de pullback en SMA 50/200 (Modo A o Modo B) con la confirmación de giro
+              alcista en <span className="font-mono">MACD (12, 26, 9)</span>:{' '}
+              <span className="font-mono">MACD<sub>t-1</sub> ≤ Señal<sub>t-1</sub></span> y{' '}
+              <span className="font-mono">MACD<sub>t</sub> &gt; Señal<sub>t</sub></span>.
             </p>
           </div>
         </div>

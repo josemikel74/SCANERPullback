@@ -241,6 +241,16 @@ export function ResultsTable({
         m200: (smaFilter === 'ALL' || smaFilter === 'SMA200') && row.isBounceMatch200,
       };
     }
+    if (strategy === 'PULLBACK_MACD') {
+      return {
+        m50:
+          (smaFilter === 'ALL' || smaFilter === 'SMA50') &&
+          row.isMacdPullbackMatch50,
+        m200:
+          (smaFilter === 'ALL' || smaFilter === 'SMA200') &&
+          row.isMacdPullbackMatch200,
+      };
+    }
     return {
       m50: (smaFilter === 'ALL' || smaFilter === 'SMA50') && row.isProximityMatch50,
       m200: (smaFilter === 'ALL' || smaFilter === 'SMA200') && row.isProximityMatch200,
@@ -265,6 +275,15 @@ export function ResultsTable({
         <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#15803D]">
           <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
           <span>Toque y Rebote</span>
+        </div>
+      );
+    }
+
+    if (strategy === 'PULLBACK_MACD') {
+      return (
+        <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#059669]">
+          <ArrowUpRight className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>Pullback + MACD ↑</span>
         </div>
       );
     }
@@ -312,7 +331,9 @@ export function ResultsTable({
           <span>
             {strategy === 'PROXIMITY'
               ? `Proximidad ±${proximityThresholdPct.toFixed(1)}%`
-              : 'Toque y Rebote Estricto'}
+              : strategy === 'PULLBACK_MACD'
+                ? `Modo C: Pullback ±${proximityThresholdPct.toFixed(1)}% + Cruce MACD ↑`
+                : 'Toque y Rebote Estricto'}
           </span>
           {scannedCount > 0 && (
             <>
