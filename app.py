@@ -20,8 +20,11 @@ except ImportError:
 
 import streamlit_core.indicators as _indicators_mod
 
-if "macd_pullback_match_50" not in getattr(
-    getattr(_indicators_mod, "SmaEvaluation", None), "__dataclass_fields__", {}
+if (
+    "macd_pullback_match_50"
+    not in getattr(getattr(_indicators_mod, "SmaEvaluation", None), "__dataclass_fields__", {})
+    or "statistical_bounce"
+    not in getattr(getattr(_indicators_mod, "SmaEvaluation", None), "__dataclass_fields__", {})
 ):
     _indicators_mod = importlib.reload(_indicators_mod)
 
@@ -31,7 +34,12 @@ calculate_macd_series = _indicators_mod.calculate_macd_series
 calculate_sma_series = _indicators_mod.calculate_sma_series
 evaluate_pullback_signals = _indicators_mod.evaluate_pullback_signals
 sanitize_candles = _indicators_mod.sanitize_candles
+empty_statistical_bounce = _indicators_mod.empty_statistical_bounce
+get_statistical_horizon_stats = _indicators_mod.get_statistical_horizon_stats
+get_statistical_probability_pct = _indicators_mod.get_statistical_probability_pct
+
 from streamlit_core.tickers_data import (
+    ALL_MASTER_TICKERS,
     DAX_40_TICKERS,
     EUROPE_TICKERS,
     IBEX_35_TICKERS,
@@ -39,6 +47,7 @@ from streamlit_core.tickers_data import (
     SP500_TICKERS,
     get_tickers_by_market,
     infer_currency_symbol,
+    resolve_ticker_info,
 )
 from streamlit_core.yahoo_service import fetch_market_batch
 
@@ -235,6 +244,97 @@ def get_cached_responses_for_watchlist(
     return found
 
 
+def infer_origin_market(ticker: str, fallback: str = "SP500") -> str:
+    upper = ticker.upper()
+    if any(t["ticker"].upper() == upper for t in IBEX_35_TICKERS):
+        return "IBEX35"
+    if any(t["ticker"].upper() == upper for t in DAX_40_TICKERS):
+        return "DAX"
+    if any(t["ticker"].upper() == upper for t in SP500_TICKERS):
+        return "SP500"
+    return fallback
+
+
+def get_all_cached_platform_responses(
+    preferred_timeframe: str,
+) -> Dict[str, tuple[Dict[str, Any], str]]:
+    """Agrega todas las respuestas vigentes de toda la plataforma en caché."""
+    now = time.time()
+    valid_entries: List[Dict[str, Any]] = []
+    for key in list(st.session_state.market_cache.keys()):
+        entry = st.session_state.market_cache[key]
+        if now > entry["expires_at"]:
+            del st.session_state.market_cache[key]
+        else:
+            valid_entries.append(entry)
+
+    valid_entries.sort(
+        key=lambda e: (1 if e["timeframe"] == preferred_timeframe else 0, e["cached_at"]),
+        reverse=True,
+    )
+
+    merged: Dict[str, tuple[Dict[str, Any], str]] = {}
+    for entry in valid_entries:
+        for res in entry["responses"]:
+            upper = res["ticker"].upper()
+            if upper not in merged:
+                orig_mkt = infer_origin_market(res["ticker"], entry["market"])
+                merged[upper] = (res, orig_mkt)
+
+    live_cache = st.session_state.get("watchlist_live_cache")
+    if isinstance(live_cache, dict):
+        live_entries: List[Dict[str, Any]] = []
+        for k in list(live_cache.keys()):
+            entry = live_cache[k]
+            if not isinstance(entry, dict) or "expires_at" not in entry or now > entry["expires_at"]:
+                del live_cache[k]
+            else:
+                live_entries.append(entry)
+        live_entries.sort(
+            key=lambda e: (1 if e["timeframe"] == preferred_timeframe else 0, e["cached_at"]),
+            reverse=True,
+        )
+        for entry in live_entries:
+            res = entry["response"]
+            upper = res["ticker"].upper()
+            if entry.get("timeframe") == preferred_timeframe or upper not in merged:
+                merged[upper] = (res, infer_origin_market(res["ticker"], "WATCHLIST"))
+
+    return merged
+
+
+def cache_platform_global_results(
+    results: List[Dict[str, Any]],
+    incidents: List[Dict[str, str]],
+    timeframe: str,
+) -> None:
+    """Distribuye los resultados del escaneo global (580 acciones) en los cachés por índice."""
+    ibex_set = {t["ticker"].upper() for t in IBEX_35_TICKERS}
+    dax_set = {t["ticker"].upper() for t in DAX_40_TICKERS}
+    sp_set = {t["ticker"].upper() for t in SP500_TICKERS}
+
+    ibex_res: List[Dict[str, Any]] = []
+    dax_res: List[Dict[str, Any]] = []
+    sp_res: List[Dict[str, Any]] = []
+    for r in results:
+        u = r["ticker"].upper()
+        if u in ibex_set:
+            ibex_res.append(r)
+        elif u in dax_set:
+            dax_res.append(r)
+        elif u in sp_set:
+            sp_res.append(r)
+
+    ibex_inc = [i for i in incidents if i["ticker"].upper() in ibex_set]
+    dax_inc = [i for i in incidents if i["ticker"].upper() in dax_set]
+    sp_inc = [i for i in incidents if i["ticker"].upper() in sp_set]
+
+    set_cache_entry("IBEX35", timeframe, ibex_res, ibex_inc)
+    set_cache_entry("DAX", timeframe, dax_res, dax_inc)
+    set_cache_entry("SP500", timeframe, sp_res, sp_inc)
+    set_cache_entry("EUROPE", timeframe, ibex_res + dax_res, ibex_inc + dax_inc)
+
+
 def evaluate_cached_market(
     responses: List[Dict[str, Any]],
     ticker_info_map: Dict[str, Dict[str, str]],
@@ -293,12 +393,17 @@ def evaluate_cached_market(
             )
         )
 
+        stat_bounce = getattr(eval_out, "statistical_bounce", None)
+        if stat_bounce is None:
+            stat_bounce = empty_statistical_bounce()
+
         rows.append(
             {
                 "ticker": ticker,
                 "yahoo_url": f"https://finance.yahoo.com/quote/{ticker}",
                 "name": info["name"],
                 "sector": info["sector"],
+                "market_id": market_id,
                 "currency": symbol,
                 "price": price,
                 "open": last_c.open,
@@ -328,6 +433,7 @@ def evaluate_cached_market(
                 "is_macd_bullish": bool(getattr(eval_out, "is_macd_bullish", False)),
                 "is_golden_cross": bool(getattr(eval_out, "is_golden_cross", False)),
                 "backtest": eval_out.backtest,
+                "stat_bounce": stat_bounce,
                 "candles": valid_candles,
                 "volume_ratio": vol_ratio,
                 "valid_candles": getattr(eval_out, "valid_candles_count", len(valid_candles)),
@@ -356,7 +462,9 @@ def get_strategy_mode(label: str) -> str:
         return "PROXIMITY"
     if label.startswith("Modo B"):
         return "BOUNCE"
-    return "PULLBACK_MACD"
+    if label.startswith("Modo C"):
+        return "PULLBACK_MACD"
+    return "STATISTICAL_AGENT"
 
 
 def get_strategy_matches(row: Dict[str, Any], strategy_mode: str) -> tuple[bool, bool]:
@@ -364,10 +472,42 @@ def get_strategy_matches(row: Dict[str, Any], strategy_mode: str) -> tuple[bool,
         return bool(row["prox_50"]), bool(row["prox_200"])
     if strategy_mode == "BOUNCE":
         return bool(row["bounce_50"]), bool(row["bounce_200"])
+    if strategy_mode == "STATISTICAL_AGENT":
+        sb = row.get("stat_bounce") or empty_statistical_bounce()
+        has_prob = sb.composite_prob_5_pct >= 55.0
+        return has_prob and bool(row["prox_50"] or row["bounce_50"]), has_prob and bool(
+            row["prox_200"] or row["bounce_200"]
+        )
     return bool(row["macd_pullback_50"]), bool(row["macd_pullback_200"])
 
 
-def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: str) -> bytes:
+STAT_MODEL_OPTIONS = {
+    "COMPOSITE": {
+        "label": "Compuesto Bayesiano (%)",
+        "desc": "45% Bayes empírico + 25% Z-Score + 30% soporte técnico",
+    },
+    "EMPIRICAL": {
+        "label": "Bayes Empírico Histórico (%)",
+        "desc": "Posterior Beta(2,2) de rebotes históricos similares",
+    },
+    "ZSCORE": {
+        "label": "Reversión Z-Score Φ(-Z) (%)",
+        "desc": "Probabilidad normal acumulada de retorno a la media de 20 velas",
+    },
+    "WILSON_95": {
+        "label": "Cota Conservadora Wilson 95% (%)",
+        "desc": "Límite inferior del intervalo de confianza al 95% ajustado por n",
+    },
+}
+
+
+def build_excel_es_csv(
+    rows: List[Dict[str, Any]],
+    market_id: str,
+    timeframe: str,
+    stat_model: str = "COMPOSITE",
+    stat_horizon: int = 5,
+) -> bytes:
     def fmt_es(val: Optional[float]) -> str:
         if val is None:
             return ""
@@ -393,6 +533,13 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
         "ATR 14",
         "Golden Cross",
         "Volumen Relativo",
+        "Prob. Rebote (%)",
+        "Bayes Empirico (%)",
+        "Wilson 95% (%)",
+        "Reversion Z-Score (%)",
+        "Z-Score (20)",
+        "Retorno Esperado (%)",
+        "Confianza Estadistica",
         "Velas Validas",
         "Media Objetivo",
     ]
@@ -403,13 +550,16 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
             if r["is_macd_bullish_cross"]
             else ("ALCISTA" if r["is_macd_bullish"] else "BAJISTA")
         )
+        sb = r.get("stat_bounce") or empty_statistical_bounce()
+        h_stats = get_statistical_horizon_stats(sb, stat_horizon)
+        prob_active = get_statistical_probability_pct(sb, stat_model, stat_horizon)
         lines.append(
             ";".join(
                 [
                     r["ticker"],
                     f'"{r["name"].replace(chr(34), chr(34)*2)}"',
                     f'"{r["sector"]}"',
-                    market_id,
+                    str(r.get("market_id") or market_id),
                     timeframe,
                     fmt_es(r["price"]),
                     fmt_es(r["change_pct"]),
@@ -425,6 +575,13 @@ def build_excel_es_csv(rows: List[Dict[str, Any]], market_id: str, timeframe: st
                     fmt_es(r["atr_14"]),
                     "SI" if r["is_golden_cross"] else "NO",
                     fmt_es(r["volume_ratio"]),
+                    fmt_es(prob_active),
+                    fmt_es(h_stats.bayesian_prob_pct),
+                    fmt_es(h_stats.wilson_lower_95_pct),
+                    fmt_es(sb.z_score_reversion_prob_pct),
+                    fmt_es(sb.z_score_20),
+                    fmt_es(h_stats.avg_return_pct),
+                    sb.confidence_label,
                     str(r["valid_candles"]),
                     r["media_badge"],
                 ]
@@ -610,6 +767,7 @@ def main() -> None:
                     "Modo A: Zona de Proximidad",
                     "Modo B: Toque y Rebote Estricto",
                     "Modo C: Pullback + Cruce MACD",
+                    "Modo D: Agente Estadístico",
                 ],
                 horizontal=True,
                 key="selected_strategy",
@@ -707,7 +865,13 @@ def main() -> None:
                             er = eval_rows[0]
                             wl_eval_by_ticker[wl_t.upper()] = er
                             m50, m200 = get_strategy_matches(er, strategy_mode)
-                            if strategy_mode == "PULLBACK_MACD":
+                            if strategy_mode == "STATISTICAL_AGENT":
+                                sb_wl = er["stat_bounce"]
+                                wl_stat_model = str(st.session_state.get("stat_model_select", "COMPOSITE"))
+                                wl_stat_horizon = int(st.session_state.get("stat_horizon_select", 5))
+                                wl_prob = get_statistical_probability_pct(sb_wl, wl_stat_model, wl_stat_horizon)
+                                sig_lbl = f"Prob. {wl_prob:.1f}% ({sb_wl.confidence_label})"
+                            elif strategy_mode == "PULLBACK_MACD":
                                 sig_lbl = (
                                     "Confluencia + MACD ↑"
                                     if (m50 and m200)
@@ -837,23 +1001,36 @@ def main() -> None:
                         ),
                     )
                     wm50, wm200 = get_strategy_matches(wl_target, strategy_mode)
-                    if strategy_mode == "PULLBACK_MACD":
-                        w_sig = (
-                            "Confluencia + MACD ↑"
-                            if (wm50 and wm200)
-                            else ("SMA 50 + MACD ↑" if wm50 else ("SMA 200 + MACD ↑" if wm200 else "Sin señal"))
+                    if strategy_mode == "STATISTICAL_AGENT":
+                        sb_w = wl_target["stat_bounce"]
+                        w_stat_model = str(st.session_state.get("stat_model_select", "COMPOSITE"))
+                        w_stat_horizon = int(st.session_state.get("stat_horizon_select", 5))
+                        w_prob = get_statistical_probability_pct(sb_w, w_stat_model, w_stat_horizon)
+                        wm6.metric(
+                            f"Prob. Rebote (+{w_stat_horizon}v)",
+                            f"{w_prob:.1f}%",
+                            f"Confianza {sb_w.confidence_label} · Z {sb_w.z_score_20:+.2f}"
+                            if sb_w.z_score_20 is not None
+                            else f"Confianza {sb_w.confidence_label}",
                         )
                     else:
-                        w_sig = (
-                            "Confluencia 50+200"
-                            if (wm50 and wm200)
-                            else ("SMA 50" if wm50 else ("SMA 200" if wm200 else "Sin señal"))
+                        if strategy_mode == "PULLBACK_MACD":
+                            w_sig = (
+                                "Confluencia + MACD ↑"
+                                if (wm50 and wm200)
+                                else ("SMA 50 + MACD ↑" if wm50 else ("SMA 200 + MACD ↑" if wm200 else "Sin señal"))
+                            )
+                        else:
+                            w_sig = (
+                                "Confluencia 50+200"
+                                if (wm50 and wm200)
+                                else ("SMA 50" if wm50 else ("SMA 200" if wm200 else "Sin señal"))
+                            )
+                        wm6.metric(
+                            "Señal Pullback",
+                            w_sig,
+                            "Golden Cross" if wl_target["is_golden_cross"] else "SMA 50 ≤ 200",
                         )
-                    wm6.metric(
-                        "Señal Pullback",
-                        w_sig,
-                        "Golden Cross" if wl_target["is_golden_cross"] else "SMA 50 ≤ 200",
-                    )
 
                     render_ohlc_chart(
                         wl_target,
@@ -999,6 +1176,98 @@ def main() -> None:
             atr_filter_map = {"Todas": 0.0, "≤ 0,5 ATR": 0.5, "≤ 1,0 ATR": 1.0, "≤ 1,5 ATR": 1.5}
             max_atr_val = atr_filter_map[atr_filter_label]
 
+        stat_model = str(st.session_state.get("stat_model_select", "COMPOSITE"))
+        stat_horizon = int(st.session_state.get("stat_horizon_select", 5))
+        stat_min_prob = float(st.session_state.get("stat_min_prob_select", 60))
+        stat_global_scope = bool(st.session_state.get("stat_global_scope_cb", True))
+
+        if strategy_mode == "STATISTICAL_AGENT":
+            with st.container(border=True):
+                st.markdown("#### Modo D · Agente Estadístico y Probabilidades de Rebote al Alza (%)")
+                st.caption(
+                    "Motor matemático bayesiano (posterior Beta(2,2), reversión normal Z-Score Φ(-Z), "
+                    "confirmación logística de soporte y cota inferior Wilson 95%) expresado en porcentaje."
+                )
+                sa_c1, sa_c2, sa_c3, sa_c4, sa_c5 = st.columns([1.6, 1.0, 1.0, 1.2, 1.3])
+                with sa_c1:
+                    stat_model = st.selectbox(
+                        "Modelo probabilístico (%)",
+                        options=list(STAT_MODEL_OPTIONS.keys()),
+                        format_func=lambda k: STAT_MODEL_OPTIONS[k]["label"],
+                        key="stat_model_select",
+                    )
+                with sa_c2:
+                    stat_horizon = st.selectbox(
+                        "Horizonte",
+                        options=[3, 5, 10],
+                        index=1,
+                        format_func=lambda h: f"+{h} velas",
+                        key="stat_horizon_select",
+                    )
+                with sa_c3:
+                    stat_min_prob = float(
+                        st.selectbox(
+                            "Prob. mínima (%)",
+                            options=[0, 55, 60, 65, 70, 75],
+                            index=2,
+                            format_func=lambda p: "Todas (≥ 0%)" if p == 0 else f"≥ {p}%",
+                            key="stat_min_prob_select",
+                        )
+                    )
+                with sa_c4:
+                    st.write("")
+                    stat_global_scope = st.checkbox(
+                        "Toda la plataforma en caché",
+                        value=True,
+                        key="stat_global_scope_cb",
+                    )
+                with sa_c5:
+                    st.write("")
+                    scan_all_clicked = st.button(
+                        f"Monitorizar Todas ({len(ALL_MASTER_TICKERS)})",
+                        type="primary",
+                        use_container_width=True,
+                        key="stat_scan_all_btn",
+                    )
+
+                st.caption(f"Criterio activo: {STAT_MODEL_OPTIONS[stat_model]['desc']}")
+
+                if scan_all_clicked:
+                    st.session_state.stop_requested = False
+                    st.session_state.last_scan_status = "SCANNING"
+                    g_prog = st.progress(
+                        0,
+                        text=f"Monitorizando 0 de {len(ALL_MASTER_TICKERS)} acciones de la plataforma...",
+                    )
+                    g_status = st.empty()
+
+                    def _on_g_progress(processed: int, total: int, incidents_count: int) -> None:
+                        pct = int((processed / max(1, total)) * 100)
+                        g_prog.progress(
+                            pct,
+                            text=f"Agente Estadístico: analizando {processed} de {total} acciones...",
+                        )
+                        if incidents_count > 0:
+                            g_status.caption(f"Incidencias de red detectadas: {incidents_count}")
+
+                    g_batch = fetch_market_batch(
+                        [t["ticker"] for t in ALL_MASTER_TICKERS],
+                        timeframe=timeframe,
+                        on_progress=_on_g_progress,
+                        should_stop=lambda: bool(st.session_state.stop_requested),
+                    )
+                    cache_platform_global_results(
+                        g_batch["results"],
+                        g_batch["incidents"],
+                        timeframe,
+                    )
+                    st.session_state.last_scan_status = (
+                        "STOPPED" if g_batch["aborted"] else "COMPLETED"
+                    )
+                    g_prog.empty()
+                    g_status.empty()
+                    st.rerun()
+
         if stop_clicked:
             st.session_state.stop_requested = True
             st.session_state.last_scan_status = "STOPPED"
@@ -1036,19 +1305,49 @@ def main() -> None:
             status_placeholder.empty()
 
         cache_entry = get_valid_cache_entry(market_id, timeframe)
+        platform_merged_map = (
+            get_all_cached_platform_responses(timeframe)
+            if (strategy_mode == "STATISTICAL_AGENT" and stat_global_scope)
+            else {}
+        )
 
-        if not cache_entry:
-            st.info(
-                f"Listo para escanear **{MARKETS_METADATA[market_id]['label']}** en temporalidad "
-                f"**{timeframe}**. Pulsa **Iniciar Escaneo** para descargar las series OHLC reales de Yahoo Finance."
-            )
+        if not cache_entry and not platform_merged_map:
+            if strategy_mode == "STATISTICAL_AGENT":
+                st.info(
+                    f"Agente Estadístico listo en temporalidad **{timeframe}**. Pulsa "
+                    f"**Monitorizar Todas ({len(ALL_MASTER_TICKERS)})** arriba o **Iniciar Escaneo** "
+                    "para calcular probabilidades de rebote al alza (%) en tiempo real."
+                )
+            else:
+                st.info(
+                    f"Listo para escanear **{MARKETS_METADATA[market_id]['label']}** en temporalidad "
+                    f"**{timeframe}**. Pulsa **Iniciar Escaneo** para descargar las series OHLC reales de Yahoo Finance."
+                )
         else:
-            all_rows, recalc_ms = evaluate_cached_market(
-                cache_entry["responses"],
-                ticker_info_map,
-                market_id,
-                float(proximity_threshold),
-            )
+            if strategy_mode == "STATISTICAL_AGENT" and stat_global_scope and platform_merged_map:
+                t_global_start = time.perf_counter()
+                all_rows = []
+                for ticker_u, (res_obj, orig_mkt) in platform_merged_map.items():
+                    info = resolve_ticker_info(res_obj["ticker"])
+                    eval_r, _ = evaluate_cached_market(
+                        [res_obj],
+                        {res_obj["ticker"]: info},
+                        orig_mkt,
+                        float(proximity_threshold),
+                    )
+                    all_rows.extend(eval_r)
+                recalc_ms = max(0.1, round((time.perf_counter() - t_global_start) * 1000.0, 2))
+                scope_total_universe = len(ALL_MASTER_TICKERS)
+                cache_label = f"Plataforma Global ({len(all_rows)} acciones · {timeframe})"
+            else:
+                all_rows, recalc_ms = evaluate_cached_market(
+                    cache_entry["responses"],
+                    ticker_info_map,
+                    market_id,
+                    float(proximity_threshold),
+                )
+                scope_total_universe = len(universe)
+                cache_label = f"{cache_entry['key']}"
 
             total_analyzed = len(all_rows)
             sma_50_hits = 0
@@ -1056,22 +1355,38 @@ def main() -> None:
             total_pullbacks = 0
 
             for r in all_rows:
-                m50, m200 = get_strategy_matches(r, strategy_mode)
-                if m50:
-                    sma_50_hits += 1
-                if m200:
-                    sma_200_hits += 1
+                if strategy_mode == "STATISTICAL_AGENT":
+                    if r["prox_50"] or r["bounce_50"]:
+                        sma_50_hits += 1
+                    if r["prox_200"] or r["bounce_200"]:
+                        sma_200_hits += 1
+                    p_val = get_statistical_probability_pct(
+                        r["stat_bounce"], stat_model, stat_horizon
+                    )
+                    if p_val >= stat_min_prob:
+                        total_pullbacks += 1
+                else:
+                    m50, m200 = get_strategy_matches(r, strategy_mode)
+                    if m50:
+                        sma_50_hits += 1
+                    if m200:
+                        sma_200_hits += 1
 
-                if (
-                    (sma_filter_label == "Todas" and (m50 or m200))
-                    or (sma_filter_label == "SMA 50" and m50)
-                    or (sma_filter_label == "SMA 200" and m200)
-                ):
-                    total_pullbacks += 1
+                    if (
+                        (sma_filter_label == "Todas" and (m50 or m200))
+                        or (sma_filter_label == "SMA 50" and m50)
+                        or (sma_filter_label == "SMA 200" and m200)
+                    ):
+                        total_pullbacks += 1
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Total Analizados", f"{total_analyzed} / {len(universe)}")
-            k2.metric("Pullbacks Detectados", str(total_pullbacks))
+            k1.metric("Total Analizados", f"{total_analyzed} / {scope_total_universe}")
+            k2.metric(
+                f"Prob. Rebote ≥ {int(stat_min_prob)}%"
+                if strategy_mode == "STATISTICAL_AGENT"
+                else "Pullbacks Detectados",
+                str(total_pullbacks),
+            )
             k3.metric("En SMA 50", str(sma_50_hits))
             k4.metric("En SMA 200", str(sma_200_hits))
 
@@ -1101,24 +1416,47 @@ def main() -> None:
                     if atr_dist is None or abs(atr_dist) > max_atr_val:
                         continue
 
-                m50, m200 = get_strategy_matches(r, strategy_mode)
+                sb = r["stat_bounce"]
+                stat_prob = get_statistical_probability_pct(sb, stat_model, stat_horizon)
+                h_stats = get_statistical_horizon_stats(sb, stat_horizon)
 
-                if not show_all:
-                    if sma_filter_label == "SMA 50" and not m50:
+                if strategy_mode == "STATISTICAL_AGENT":
+                    if sma_filter_label == "SMA 50" and r["sma_50"] is None:
                         continue
-                    if sma_filter_label == "SMA 200" and not m200:
+                    if sma_filter_label == "SMA 200" and r["sma_200"] is None:
                         continue
-                    if sma_filter_label == "Todas" and not (m50 or m200):
+                    if not show_all and stat_prob < stat_min_prob:
                         continue
-
-                if m50 and m200:
-                    media_badge = "Confluencia + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "Confluencia 50 + 200"
-                elif m50:
-                    media_badge = "SMA 50 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 50"
-                elif m200:
-                    media_badge = "SMA 200 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 200"
+                    media_badge = f"Prob. {stat_prob:.1f}% ({sb.confidence_label})"
+                    m50 = r["prox_50"] or r["bounce_50"]
+                    m200 = r["prox_200"] or r["bounce_200"]
                 else:
-                    media_badge = "Sin señal"
+                    m50, m200 = get_strategy_matches(r, strategy_mode)
+
+                    if not show_all:
+                        if sma_filter_label == "SMA 50" and not m50:
+                            continue
+                        if sma_filter_label == "SMA 200" and not m200:
+                            continue
+                        if sma_filter_label == "Todas" and not (m50 or m200):
+                            continue
+
+                    if m50 and m200:
+                        media_badge = (
+                            "Confluencia + MACD ↑"
+                            if strategy_mode == "PULLBACK_MACD"
+                            else "Confluencia 50 + 200"
+                        )
+                    elif m50:
+                        media_badge = (
+                            "SMA 50 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 50"
+                        )
+                    elif m200:
+                        media_badge = (
+                            "SMA 200 + MACD ↑" if strategy_mode == "PULLBACK_MACD" else "SMA 200"
+                        )
+                    else:
+                        media_badge = "Sin señal"
 
                 d50_abs = abs(r["dist_50"]) if r["dist_50"] is not None else 1e9
                 d200_abs = abs(r["dist_200"]) if r["dist_200"] is not None else 1e9
@@ -1133,12 +1471,53 @@ def main() -> None:
                 enriched["media_badge"] = media_badge
                 enriched["min_dist"] = min_dist
                 enriched["display_atr_dist"] = atr_dist
+                enriched["stat_prob"] = stat_prob
+                enriched["stat_h_stats"] = h_stats
                 filtered_rows.append(enriched)
 
-            filtered_rows.sort(key=lambda item: item["min_dist"])
+            if strategy_mode == "STATISTICAL_AGENT":
+                filtered_rows.sort(key=lambda item: (-item["stat_prob"], item["min_dist"]))
+            else:
+                filtered_rows.sort(key=lambda item: item["min_dist"])
+
+            if strategy_mode == "STATISTICAL_AGENT" and filtered_rows:
+                avg_prob = sum(x["stat_prob"] for x in filtered_rows) / len(filtered_rows)
+                high_prob_n = sum(1 for x in filtered_rows if x["stat_prob"] >= 65.0)
+                exp_rets = [
+                    x["stat_h_stats"].avg_return_pct
+                    for x in filtered_rows
+                    if x["stat_h_stats"].avg_return_pct is not None
+                ]
+                avg_exp_ret = (sum(exp_rets) / len(exp_rets)) if exp_rets else None
+
+                sk1, sk2, sk3 = st.columns(3)
+                sk1.metric(
+                    f"Prob. Media ({STAT_MODEL_OPTIONS[stat_model]['label'].split(' ')[0]})",
+                    f"{avg_prob:.1f}%",
+                    f"Horizonte +{stat_horizon} velas",
+                )
+                sk2.metric("Acciones con Prob. ≥ 65%", str(high_prob_n))
+                sk3.metric(
+                    f"Retorno Medio Hist. (+{stat_horizon}v)",
+                    f"{avg_exp_ret:+.2f}%" if avg_exp_ret is not None else "—",
+                    "Muestra condicional histórica",
+                )
+
+                top5 = filtered_rows[:5]
+                st.markdown(f"**Top {len(top5)} Oportunidades Estadísticas de Rebote al Alza (%)**")
+                top_cols = st.columns(len(top5))
+                for idx_top, top_item in enumerate(top5):
+                    top_sb = top_item["stat_bounce"]
+                    top_h = top_item["stat_h_stats"]
+                    with top_cols[idx_top]:
+                        st.metric(
+                            f"{top_item['ticker']} · {top_item['name'][:18]}",
+                            f"{top_item['stat_prob']:.1f}%",
+                            f"Bayes {top_h.bayesian_prob_pct:.0f}% · Z {top_sb.z_score_reversion_prob_pct:.0f}% · {top_sb.confidence_label}",
+                        )
 
             st.caption(
-                f"Caché activo `{cache_entry['key']}` (TTL 5 min) · "
+                f"Caché activo `{cache_label}` (TTL 5 min) · "
                 f"Recálculo en memoria: **{recalc_ms:.2f} ms** · "
                 f"Mostrando **{len(filtered_rows)}** valores"
             )
@@ -1146,7 +1525,7 @@ def main() -> None:
             if not filtered_rows:
                 st.warning(
                     "Ningún valor coincide con los filtros actuales. Prueba ampliando el rango ±%, "
-                    "relajando RSI/Volumen/ATR o activando «Mostrar todo el índice»."
+                    "relajando RSI/Volumen/ATR, reduciendo la Prob. mínima o activando «Mostrar todo el índice»."
                 )
             else:
                 df_display = pd.DataFrame(
@@ -1180,6 +1559,10 @@ def main() -> None:
                             "Dist. ATR": (
                                 f"{r['display_atr_dist']:+.2f}" if r["display_atr_dist"] is not None else "—"
                             ),
+                            "Prob. Rebote (%)": r["stat_prob"],
+                            "Bayes Emp. (%)": r["stat_h_stats"].bayesian_prob_pct,
+                            "Wilson 95% (%)": r["stat_h_stats"].wilson_lower_95_pct,
+                            "Retorno Esp. (%)": r["stat_h_stats"].avg_return_pct,
                             "Media Objetivo": r["media_badge"],
                             "Vol. Rel.": r["volume_ratio"],
                         }
@@ -1205,7 +1588,18 @@ def main() -> None:
                         return "color: #1D4ED8; font-weight: 600;"
                     return "color: #64748B;"
 
+                def _color_prob(val: Any) -> str:
+                    if pd.isna(val):
+                        return "color: #64748B;"
+                    if float(val) >= 65.0:
+                        return "color: #059669; font-weight: 700;"
+                    if float(val) >= 55.0:
+                        return "color: #4338CA; font-weight: 600;"
+                    return "color: #64748B;"
+
                 def _color_media(val: Any) -> str:
+                    if isinstance(val, str) and val.startswith("Prob."):
+                        return "background-color: #EEF2FF; color: #3730A3; font-weight: 600;"
                     if isinstance(val, str) and val.startswith("Confluencia"):
                         return "background-color: #FEF3C7; color: #B45309; font-weight: 600;"
                     if isinstance(val, str) and val.startswith("SMA 50"):
@@ -1223,11 +1617,16 @@ def main() -> None:
                             "SMA 200": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
                             "RSI 14": lambda x: f"{x:.1f}" if pd.notna(x) else "—",
                             "MACD": lambda x: f"{x:+.2f}" if pd.notna(x) else "—",
+                            "Prob. Rebote (%)": "{:.1f}%",
+                            "Bayes Emp. (%)": "{:.1f}%",
+                            "Wilson 95% (%)": "{:.1f}%",
+                            "Retorno Esp. (%)": lambda x: f"{x:+.2f}%" if pd.notna(x) else "—",
                             "Vol. Rel.": "{:.2f}x",
                         }
                     )
                     .map(_color_dist, subset=["Dist. SMA 50", "Dist. SMA 200"])
                     .map(_color_macd_cross, subset=["Cruce MACD"])
+                    .map(_color_prob, subset=["Prob. Rebote (%)"])
                     .map(_color_media, subset=["Media Objetivo"])
                 )
 
@@ -1247,7 +1646,13 @@ def main() -> None:
                 # Exportación: CSV Excel ES y Copiar Tickers TradingView
                 exp_col1, exp_col2 = st.columns([1, 2])
                 with exp_col1:
-                    csv_bytes = build_excel_es_csv(filtered_rows, market_id, timeframe)
+                    csv_bytes = build_excel_es_csv(
+                        filtered_rows,
+                        market_id,
+                        timeframe,
+                        stat_model=stat_model,
+                        stat_horizon=stat_horizon,
+                    )
                     st.download_button(
                         label="Exportar CSV (Excel en español)",
                         data=csv_bytes,
@@ -1304,6 +1709,48 @@ def main() -> None:
                         chart_key=f"main_audit_chart_{target['ticker']}_{timeframe}",
                     )
 
+                    # Modo D: Análisis Estadístico y Probabilidad de Rebote al Alza (%)
+                    tsb = target["stat_bounce"]
+                    st.markdown(
+                        f"**Modo D · Agente Estadístico — Probabilidad de Rebote al Alza (%)** · "
+                        f"Confianza: `{tsb.confidence_label}`"
+                    )
+                    st_c1, st_c2, st_c3, st_c4 = st.columns(4)
+                    st_c1.metric(
+                        "Z-Score (20 velas)",
+                        f"{tsb.z_score_20:+.2f}σ" if tsb.z_score_20 is not None else "—",
+                    )
+                    st_c2.metric("Reversión Φ(-Z)", f"{tsb.z_score_reversion_prob_pct:.1f}%")
+                    st_c3.metric("Soporte Logístico", f"{tsb.support_confirmation_prob_pct:.1f}%")
+                    st_c4.metric(
+                        "Volatilidad 20v",
+                        f"{tsb.volatility_20_pct:.2f}%" if tsb.volatility_20_pct is not None else "—",
+                    )
+                    h_cols = st.columns(3)
+                    for idx_h, (h_bars, h_obj, comp_p) in enumerate(
+                        [
+                            (3, tsb.horizon_3, tsb.composite_prob_3_pct),
+                            (5, tsb.horizon_5, tsb.composite_prob_5_pct),
+                            (10, tsb.horizon_10, tsb.composite_prob_10_pct),
+                        ]
+                    ):
+                        with h_cols[idx_h]:
+                            emp_s = (
+                                f"{h_obj.empirical_win_rate_pct:.1f}%"
+                                if h_obj.empirical_win_rate_pct is not None
+                                else "—"
+                            )
+                            ret_s = (
+                                f"{h_obj.avg_return_pct:+.2f}%"
+                                if h_obj.avg_return_pct is not None
+                                else "—"
+                            )
+                            st.caption(
+                                f"**+{h_bars} velas** · Compuesta: `{comp_p:.1f}%` · "
+                                f"Bayes: `{h_obj.bayesian_prob_pct:.1f}%` · Empírica: `{emp_s}` · "
+                                f"Wilson 95%: `{h_obj.wilson_lower_95_pct:.1f}%` · Retorno: `{ret_s}` (n={h_obj.sample_size})"
+                            )
+
                     d50, d200 = target["diag_50"], target["diag_200"]
                     bt = target["backtest"]
                     col_d1, col_d2 = st.columns(2)
@@ -1336,7 +1783,7 @@ def main() -> None:
 
             # Panel desplegable discreto con tickers omitidos
             omitted_items: List[Dict[str, str]] = []
-            for inc in cache_entry["incidents"]:
+            for inc in (cache_entry["incidents"] if cache_entry else []):
                 info = ticker_info_map.get(inc["ticker"])
                 omitted_items.append(
                     {
@@ -1387,6 +1834,10 @@ def main() -> None:
               (`Low <= SMA * 1.002`) viniendo de cotizar por encima hace 5–15 velas, con cierre actual estrictamente superior (`Close > SMA`).
             - **Modo C — Pullback + Cruce MACD (al alza)**: Combina la señal de pullback en SMA 50/200 (Modo A o Modo B)
               con un cruce alcista confirmado del MACD `(12, 26, 9)` (`MACD anterior ≤ Señal anterior` y `MACD actual > Señal actual`).
+            - **Modo D — Agente Estadístico y Probabilidades de Rebote al Alza (%)**: Monitoriza en tiempo real las **580 acciones**
+              de toda la plataforma y calcula mediante **Bayes Empírico Beta(2,2)**, **Reversión Normal Z-Score `Φ(-Z)`**,
+              **Confirmación Logística de Soporte** y **Cota Conservadora Wilson 95%** la probabilidad de rebote alcista expresada en **%**
+              para horizontes de `+3`, `+5` y `+10` velas.
             - **Visor Interactivo Watchlist**: Permite seleccionar cualquier acción de tu lista de seguimiento para visualizar
               su gráfico OHLC en tiempo real con SMA 50/200, MACD (12, 26, 9), RSI (14) y ATR (14).
             - **Filtros Técnicos Avanzados**: Golden Cross (`SMA 50 > SMA 200`), Cruce MACD al alza, RSI(14) de Wilder,

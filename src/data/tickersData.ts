@@ -30,10 +30,19 @@ export const SP500_TICKERS: TickerInfo[] = MASTER_PAYLOAD.SP500;
 export const EUROPE_TICKERS: TickerInfo[] = [...IBEX_35_TICKERS, ...DAX_40_TICKERS];
 
 /**
+ * Universo maestro completo (580 acciones sin recortes: IBEX 35 + DAX 40 + S&P 500).
+ */
+export const ALL_MASTER_TICKERS: TickerInfo[] = [
+  ...IBEX_35_TICKERS,
+  ...DAX_40_TICKERS,
+  ...SP500_TICKERS,
+];
+
+/**
  * Mapa maestro global de los 580 valores oficiales para búsqueda O(1).
  */
 export const MASTER_TICKER_MAP: Map<string, TickerInfo> = new Map(
-  [...IBEX_35_TICKERS, ...DAX_40_TICKERS, ...SP500_TICKERS].map((item) => [
+  ALL_MASTER_TICKERS.map((item) => [
     item.ticker.toUpperCase(),
     item,
   ])

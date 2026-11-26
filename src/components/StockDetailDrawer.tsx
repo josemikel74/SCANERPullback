@@ -400,6 +400,99 @@ export function StockDetailDrawer({
           />
         </div>
       </div>
+
+      {/* Diagnóstico estadístico y probabilístico (Modo D) */}
+      <div className="space-y-2.5 border-t border-[#E2E8F0] pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="text-xs font-bold text-[#0F172A]">
+            Modo D · Análisis Estadístico y Probabilidad de Rebote al Alza (%)
+          </h4>
+          <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono tabular-nums text-[#475569]">
+            <span>
+              Z-Score (20):{' '}
+              <strong className="text-[#0F172A]">
+                {stock.statisticalBounce.zScore20 !== null
+                  ? `${stock.statisticalBounce.zScore20 >= 0 ? '+' : ''}${stock.statisticalBounce.zScore20.toFixed(2)}σ`
+                  : '—'}
+              </strong>
+            </span>
+            <span>
+              Reversión Φ(-Z):{' '}
+              <strong className="text-[#3730A3]">
+                {stock.statisticalBounce.zScoreReversionProbPct.toFixed(1)}%
+              </strong>
+            </span>
+            <span>
+              Soporte Logístico:{' '}
+              <strong className="text-[#059669]">
+                {stock.statisticalBounce.supportConfirmationProbPct.toFixed(1)}%
+              </strong>
+            </span>
+            <span>
+              Confianza:{' '}
+              <strong className="text-[#0F172A]">
+                {stock.statisticalBounce.confidenceLabel}
+              </strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+          {[
+            {
+              label: 'Horizonte +3 velas',
+              comp: stock.statisticalBounce.compositeProb3Pct,
+              h: stock.statisticalBounce.horizon3,
+            },
+            {
+              label: 'Horizonte +5 velas',
+              comp: stock.statisticalBounce.compositeProb5Pct,
+              h: stock.statisticalBounce.horizon5,
+            },
+            {
+              label: 'Horizonte +10 velas',
+              comp: stock.statisticalBounce.compositeProb10Pct,
+              h: stock.statisticalBounce.horizon10,
+            },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="border border-[#E2E8F0] bg-[#F8FAFC] rounded-lg p-3 space-y-1.5"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-[#0F172A]">{item.label}</span>
+                <span className="font-mono font-bold text-[#059669] tabular-nums">
+                  {item.comp.toFixed(1)}%
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1 font-mono tabular-nums text-[#475569]">
+                <span>Bayes: {item.h.bayesianProbPct.toFixed(1)}%</span>
+                <span className="text-right">
+                  Empírico: {item.h.empiricalWinRatePct !== null ? `${item.h.empiricalWinRatePct.toFixed(1)}%` : '—'}
+                </span>
+                <span>IC 95% mín: {item.h.wilsonLower95Pct.toFixed(1)}%</span>
+                <span className="text-right">
+                  Muestra: n={item.h.sampleSize}
+                </span>
+              </div>
+              <div className="text-[10px] font-mono tabular-nums text-[#64748B]">
+                Retorno medio esperado:{' '}
+                <span
+                  className={
+                    (item.h.avgReturnPct ?? 0) >= 0
+                      ? 'text-[#059669] font-semibold'
+                      : 'text-[#DC2626] font-semibold'
+                  }
+                >
+                  {item.h.avgReturnPct !== null
+                    ? `${item.h.avgReturnPct >= 0 ? '+' : ''}${item.h.avgReturnPct.toFixed(2)}%`
+                    : '—'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </aside>
   );
 }

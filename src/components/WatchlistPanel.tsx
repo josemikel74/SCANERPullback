@@ -253,6 +253,23 @@ export function WatchlistPanel({
       );
     }
 
+    if (strategy === 'STATISTICAL_AGENT') {
+      const prob = analysis.statisticalBounce.compositeProb5Pct;
+      return (
+        <span
+          className={`inline-flex items-center gap-1 font-mono text-xs font-semibold tabular-nums ${
+            prob >= 65
+              ? 'text-[#059669]'
+              : prob >= 55
+                ? 'text-[#3730A3]'
+                : 'text-[#64748B]'
+          }`}
+        >
+          <span>Prob. {prob.toFixed(1)}%</span>
+        </span>
+      );
+    }
+
     const { m50, m200 } = doesItemMatchStrategy(analysis, strategy);
 
     if (!m50 && !m200) {

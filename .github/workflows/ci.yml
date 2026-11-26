@@ -81,6 +81,10 @@ jobs:
           assert isinstance(res.is_macd_bullish_cross, bool)
           assert isinstance(res.macd_pullback_match_50, bool)
           assert isinstance(res.macd_pullback_match_200, bool)
+          assert 5.0 <= res.statistical_bounce.composite_prob_5_pct <= 95.0
+          assert 5.0 <= res.statistical_bounce.z_score_reversion_prob_pct <= 95.0
+          assert 0.0 <= res.statistical_bounce.horizon_5.bayesian_prob_pct <= 100.0
+          assert 0.0 <= res.statistical_bounce.horizon_5.wilson_lower_95_pct <= 100.0
           assert len(aggregate_hourly_to_4h(candles[:8])) == 2
-          print("CI Python checks OK: 580 tickers, SMA/RSI/MACD/ATR/GoldenCross/ModoC/4h verified.")
+          print("CI Python checks OK: 580 tickers, SMA/RSI/MACD/ATR/GoldenCross/ModoC/ModoD/4h verified.")
           EOF

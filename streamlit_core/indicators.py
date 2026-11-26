@@ -54,6 +54,32 @@ class PullbackBacktestStats:
 
 
 @dataclass
+class StatisticalHorizonStats:
+    horizon_bars: int
+    sample_size: int
+    wins_count: int
+    empirical_win_rate_pct: Optional[float]
+    bayesian_prob_pct: float
+    wilson_lower_95_pct: float
+    avg_return_pct: Optional[float]
+
+
+@dataclass
+class StatisticalBounceAnalysis:
+    z_score_20: Optional[float]
+    z_score_reversion_prob_pct: float
+    support_confirmation_prob_pct: float
+    volatility_20_pct: Optional[float]
+    horizon_3: StatisticalHorizonStats
+    horizon_5: StatisticalHorizonStats
+    horizon_10: StatisticalHorizonStats
+    composite_prob_3_pct: float
+    composite_prob_5_pct: float
+    composite_prob_10_pct: float
+    confidence_label: str
+
+
+@dataclass
 class SmaEvaluation:
     valid_candles_count: int
     sma_50: Optional[float]
@@ -79,6 +105,7 @@ class SmaEvaluation:
     is_macd_bullish: bool
     is_golden_cross: bool
     backtest: PullbackBacktestStats
+    statistical_bounce: StatisticalBounceAnalysis
 
 
 def _is_valid_pos(val: Any) -> bool:
@@ -209,11 +236,12 @@ def calculate_sma_last_candles(
     return [calculate_sma_at_offset(closes, period, offset) for offset in range(lookback + 1)]
 
 
-def calculate_rsi_14(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> Optional[float]:
-    """Calcula el RSI (14) suavizado de Wilder."""
+def calculate_rsi_series(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> List[Optional[float]]:
+    """Calcula la serie completa de RSI (14) suavizado de Wilder."""
     n = len(closes)
+    result: List[Optional[float]] = [None] * n
     if period <= 0 or n <= period:
-        return None
+        return result
 
     gain_sum = 0.0
     loss_sum = 0.0
@@ -226,6 +254,7 @@ def calculate_rsi_14(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> O
 
     avg_gain = gain_sum / period
     avg_loss = loss_sum / period
+    result[period] = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
 
     for i in range(period + 1, n):
         diff = closes[i] - closes[i - 1]
@@ -233,11 +262,15 @@ def calculate_rsi_14(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> O
         loss = abs(diff) if diff < 0 else 0.0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
+        result[i] = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
 
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return result
+
+
+def calculate_rsi_14(closes: List[float], period: int = RSI_DEFAULT_PERIOD) -> Optional[float]:
+    """Calcula el último RSI (14) suavizado de Wilder."""
+    series = calculate_rsi_series(closes, period)
+    return series[-1] if series else None
 
 
 def calculate_atr_14(valid_candles: List[Candle], period: int = ATR_DEFAULT_PERIOD) -> Optional[float]:
@@ -359,6 +392,248 @@ def run_pullback_backtest(
     )
 
 
+def _clamp(val: float, min_v: float, max_v: float) -> float:
+    return min(max_v, max(min_v, val))
+
+
+def normal_cdf(x: float) -> float:
+    """Función de distribución acumulada normal estándar Φ(x)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def wilson_lower_bound_pct(wins: int, sample_size: int, z: float = 1.96) -> float:
+    """Cota inferior del intervalo de confianza de Wilson al 95% en porcentaje."""
+    if sample_size <= 0:
+        return 0.0
+    p = _clamp(wins / sample_size, 0.0, 1.0)
+    z2 = z * z
+    denom = 1.0 + z2 / sample_size
+    center = p + z2 / (2.0 * sample_size)
+    margin = z * math.sqrt((p * (1.0 - p) + z2 / (4.0 * sample_size)) / sample_size)
+    return _clamp(((center - margin) / denom) * 100.0, 0.0, 100.0)
+
+
+def _empty_horizon_stats(horizon_bars: int) -> StatisticalHorizonStats:
+    return StatisticalHorizonStats(
+        horizon_bars=horizon_bars,
+        sample_size=0,
+        wins_count=0,
+        empirical_win_rate_pct=None,
+        bayesian_prob_pct=50.0,
+        wilson_lower_95_pct=0.0,
+        avg_return_pct=None,
+    )
+
+
+def empty_statistical_bounce() -> StatisticalBounceAnalysis:
+    return StatisticalBounceAnalysis(
+        z_score_20=None,
+        z_score_reversion_prob_pct=50.0,
+        support_confirmation_prob_pct=50.0,
+        volatility_20_pct=None,
+        horizon_3=_empty_horizon_stats(3),
+        horizon_5=_empty_horizon_stats(5),
+        horizon_10=_empty_horizon_stats(10),
+        composite_prob_3_pct=50.0,
+        composite_prob_5_pct=50.0,
+        composite_prob_10_pct=50.0,
+        confidence_label="BAJA",
+    )
+
+
+def _evaluate_horizon_conditional(
+    closes: List[float],
+    sma50_series: List[Optional[float]],
+    sma20_series: List[Optional[float]],
+    rsi_series: List[Optional[float]],
+    horizon_bars: int,
+) -> StatisticalHorizonStats:
+    n = len(closes)
+    start_idx = 50 if n >= 65 else 20
+    end_idx = n - 1 - horizon_bars
+    if end_idx < start_idx:
+        return _empty_horizon_stats(horizon_bars)
+
+    sample_size = 0
+    wins_count = 0
+    return_sum = 0.0
+
+    for i in range(start_idx, end_idx + 1):
+        c = closes[i]
+        s50 = sma50_series[i]
+        s20 = sma20_series[i]
+        r14 = rsi_series[i]
+
+        near_sma50 = s50 is not None and s50 > 0 and abs((c - s50) / s50) <= 0.03
+        below_sma20 = s20 is not None and s20 > 0 and c < s20
+        rsi_pullback = r14 is not None and r14 <= 50.0
+
+        if near_sma50 or below_sma20 or rsi_pullback:
+            fwd_ret_pct = ((closes[i + horizon_bars] - c) / c) * 100.0
+            sample_size += 1
+            if fwd_ret_pct > 0:
+                wins_count += 1
+            return_sum += fwd_ret_pct
+
+    empirical_win_rate = (wins_count / sample_size) * 100.0 if sample_size > 0 else None
+    bayesian_prob = ((wins_count + 2.0) / (sample_size + 4.0)) * 100.0
+    wilson_95 = wilson_lower_bound_pct(wins_count, sample_size, 1.96)
+    avg_ret = return_sum / sample_size if sample_size > 0 else None
+
+    return StatisticalHorizonStats(
+        horizon_bars=horizon_bars,
+        sample_size=sample_size,
+        wins_count=wins_count,
+        empirical_win_rate_pct=empirical_win_rate,
+        bayesian_prob_pct=bayesian_prob,
+        wilson_lower_95_pct=wilson_95,
+        avg_return_pct=avg_ret,
+    )
+
+
+def calculate_statistical_bounce_analysis(
+    valid_candles: List[Candle],
+    closes: List[float],
+    sma_50: Optional[float],
+    sma_200: Optional[float],
+    slope_50_positive: bool,
+    rsi_14: Optional[float],
+    is_macd_bullish_cross: bool,
+    cur_macd_hist: Optional[float],
+    prev_macd_hist: Optional[float],
+) -> StatisticalBounceAnalysis:
+    n = len(closes)
+    if n < 21:
+        return empty_statistical_bounce()
+
+    win20 = closes[-20:]
+    mean20 = sum(win20) / 20.0
+    variance20 = sum((v - mean20) * (v - mean20) for v in win20) / 19.0
+    std20 = math.sqrt(variance20)
+    current_close = closes[-1]
+    z_score_20 = (current_close - mean20) / std20 if std20 > 1e-12 else 0.0
+    z_reversion_prob = _clamp(normal_cdf(-z_score_20) * 100.0, 5.0, 95.0)
+
+    log_returns = [
+        math.log(closes[i] / closes[i - 1])
+        for i in range(n - 20, n)
+        if closes[i - 1] > 0 and closes[i] > 0
+    ]
+    volatility_20_pct: Optional[float] = None
+    if len(log_returns) >= 2:
+        lr_mean = sum(log_returns) / len(log_returns)
+        lr_var = sum((v - lr_mean) * (v - lr_mean) for v in log_returns) / (len(log_returns) - 1)
+        volatility_20_pct = math.sqrt(lr_var) * 100.0
+
+    recent_vols = [c.volume for c in valid_candles[-21:-1] if c.volume > 0]
+    avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
+    last_vol = valid_candles[-1].volume
+    vol_ratio = (last_vol / avg_vol) if (avg_vol > 0 and last_vol > 0) else 1.0
+
+    logit = 0.0
+    if sma_50 is not None and sma_50 > 0:
+        d50 = ((current_close - sma_50) / sma_50) * 100.0
+        logit += 0.35 if slope_50_positive else -0.25
+        if -2.5 <= d50 <= 2.5:
+            logit += 0.45
+        elif d50 < -5.0:
+            logit += 0.15
+        elif d50 > 5.0:
+            logit -= 0.30
+    if sma_200 is not None and sma_200 > 0:
+        d200 = ((current_close - sma_200) / sma_200) * 100.0
+        if current_close > sma_200:
+            logit += 0.25
+        if abs(d200) <= 2.5:
+            logit += 0.35
+    if rsi_14 is not None:
+        if rsi_14 <= 35.0:
+            logit += 0.55
+        elif rsi_14 <= 50.0:
+            logit += 0.30
+        elif rsi_14 >= 70.0:
+            logit -= 0.55
+    if is_macd_bullish_cross:
+        logit += 0.65
+    elif cur_macd_hist is not None and prev_macd_hist is not None and cur_macd_hist > prev_macd_hist:
+        logit += 0.30
+    elif (
+        cur_macd_hist is not None
+        and cur_macd_hist < 0
+        and prev_macd_hist is not None
+        and cur_macd_hist < prev_macd_hist
+    ):
+        logit -= 0.20
+    if vol_ratio >= 1.2:
+        logit += 0.20
+
+    support_prob = _clamp((1.0 / (1.0 + math.exp(-logit))) * 100.0, 12.0, 92.0)
+
+    sma50_series = calculate_sma_series(closes, SMA_SHORT_PERIOD)
+    sma20_series = calculate_sma_series(closes, 20)
+    rsi_series = calculate_rsi_series(closes, RSI_DEFAULT_PERIOD)
+
+    h3 = _evaluate_horizon_conditional(closes, sma50_series, sma20_series, rsi_series, 3)
+    h5 = _evaluate_horizon_conditional(closes, sma50_series, sma20_series, rsi_series, 5)
+    h10 = _evaluate_horizon_conditional(closes, sma50_series, sma20_series, rsi_series, 10)
+
+    def _combine(bayes_pct: float) -> float:
+        return _clamp(0.45 * bayes_pct + 0.25 * z_reversion_prob + 0.30 * support_prob, 5.0, 95.0)
+
+    comp3 = _combine(h3.bayesian_prob_pct)
+    comp5 = _combine(h5.bayesian_prob_pct)
+    comp10 = _combine(h10.bayesian_prob_pct)
+
+    confidence = "BAJA"
+    if h5.sample_size >= 20 and comp5 >= 65.0:
+        confidence = "ALTA"
+    elif h5.sample_size >= 10 and comp5 >= 55.0:
+        confidence = "MEDIA"
+    elif h5.sample_size >= 5:
+        confidence = "MODERADA"
+
+    return StatisticalBounceAnalysis(
+        z_score_20=z_score_20,
+        z_score_reversion_prob_pct=z_reversion_prob,
+        support_confirmation_prob_pct=support_prob,
+        volatility_20_pct=volatility_20_pct,
+        horizon_3=h3,
+        horizon_5=h5,
+        horizon_10=h10,
+        composite_prob_3_pct=comp3,
+        composite_prob_5_pct=comp5,
+        composite_prob_10_pct=comp10,
+        confidence_label=confidence,
+    )
+
+
+def get_statistical_horizon_stats(
+    stats: StatisticalBounceAnalysis, horizon: int
+) -> StatisticalHorizonStats:
+    if horizon == 3:
+        return stats.horizon_3
+    if horizon == 10:
+        return stats.horizon_10
+    return stats.horizon_5
+
+
+def get_statistical_probability_pct(
+    stats: StatisticalBounceAnalysis, model: str, horizon: int
+) -> float:
+    h_stats = get_statistical_horizon_stats(stats, horizon)
+    if model == "EMPIRICAL":
+        return h_stats.bayesian_prob_pct
+    if model == "ZSCORE":
+        return stats.z_score_reversion_prob_pct
+    if model == "WILSON_95":
+        return h_stats.wilson_lower_95_pct
+    if horizon == 3:
+        return stats.composite_prob_3_pct
+    if horizon == 10:
+        return stats.composite_prob_10_pct
+    return stats.composite_prob_5_pct
+
+
 def _empty_diagnostics() -> SmaDiagnostics:
     return SmaDiagnostics(
         sma_current=None,
@@ -476,6 +751,7 @@ def evaluate_pullback_signals(
                 sma_50=_empty_backtest_summary(),
                 sma_200=_empty_backtest_summary(),
             ),
+            statistical_bounce=empty_statistical_bounce(),
         )
 
     closes = [c.close for c in valid_candles]
@@ -521,6 +797,18 @@ def evaluate_pullback_signals(
     atr_dist_200 = (current_close - sma_200) / atr_14 if (atr_14 and atr_14 > 0 and sma_200 is not None) else None
     is_golden_cross = sma_50 is not None and sma_200 is not None and sma_50 > sma_200
     backtest = run_pullback_backtest(valid_candles, short_period, long_period)
+    prev_macd_hist = hist_series[-2] if n >= 2 else None
+    statistical_bounce = calculate_statistical_bounce_analysis(
+        valid_candles,
+        closes,
+        sma_50,
+        sma_200,
+        diag_50.slope_positive_or_flat,
+        rsi_14,
+        is_macd_bullish_cross,
+        macd_histogram,
+        prev_macd_hist,
+    )
 
     return SmaEvaluation(
         valid_candles_count=len(valid_candles),
@@ -547,4 +835,5 @@ def evaluate_pullback_signals(
         is_macd_bullish=is_macd_bullish,
         is_golden_cross=is_golden_cross,
         backtest=backtest,
+        statistical_bounce=statistical_bounce,
     )

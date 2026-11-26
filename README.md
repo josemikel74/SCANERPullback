@@ -21,10 +21,15 @@ El repositorio es **100% dual-compatible**:
   - **ATR (14)** de Wilder y **Distancia Normalizada en ATR** `(Cierre - SMA) / ATR(14)`.
   - **Volumen Relativo mínimo** sobre media de 20 velas (`≥ 1,2x`, `≥ 1,5x`, `≥ 2,0x`).
 - **Backtest Histórico Rápido**: Evalúa sobre la serie histórica descargada (`2y` diaria o `5y` semanal) los rebotes previos en SMA 50 y SMA 200, calculando tasa de acierto y retorno medio a `+5` y `+10` velas.
-- **Triple Estrategia en Tiempo Real (<10 ms)**:
+- **Cuádruple Estrategia en Tiempo Real (<10 ms)**:
   - **Modo A — Zona de Proximidad (`±%`)**: Tendencia alcista/neutra en SMA, precio previo por encima hace 5–15 velas y distancia porcentual dentro de `[-umbral%, +umbral%]`.
   - **Modo B — Toque y Rebote Estricto**: Mínimo de la vela actual o anterior `≤ SMA × 1.002` con cierre actual estrictamente superior a la media (`Close > SMA`).
   - **Modo C — Pullback + Cruce MACD (al alza)**: Combina señal de pullback en SMA 50/200 (Modo A o Modo B) con cruce alcista confirmado del MACD `(12, 26, 9)` en la vela actual.
+  - **Modo D — Agente Estadístico y Probabilidades de Rebote al Alza (%)**: Monitoriza en tiempo real las **580 acciones** de toda la plataforma (o el mercado activo) y calcula probabilidades matemáticas expresadas en **%** para `+3`, `+5` y `+10` velas con 4 modelos seleccionables:
+    1. **Compuesto Bayesiano (%)** (`45%` Bayes empírico + `25%` Reversión Z-Score + `30%` Soporte logístico).
+    2. **Bayes Empírico Histórico (%)** (posterior `Beta(2,2)` sobre rebotes históricos similares).
+    3. **Reversión Z-Score `Φ(-Z)` (%)** (CDF normal acumulada de retorno a la media de 20 velas).
+    4. **Cota Conservadora Wilson 95% (%)** (límite inferior del intervalo de confianza al 95%).
 - **Control Anti-Errores, Caché TTL 5 min y Exportación**:
   - Cancelación instantánea con `AbortController`, descarga por lotes controlados (`6` tickers cada `300 ms` en navegador / `yf.download` vectorizado en Streamlit), micro-barras centradas en `0.00%`, enlaces directos a Yahoo Finance, **Exportar CSV** (Excel regional español UTF-8 BOM + `;`) y **Copiar Tickers** para TradingView.
 - **Pipeline GitHub Actions (`.github/workflows/ci.yml`)**: Valida `tsc --noEmit`, `npm run build`, `py_compile`, paridad matemática y conteo de `data/tickers.json` en cada *push* o *pull request*.
@@ -46,25 +51,26 @@ El repositorio es **100% dual-compatible**:
 │   ├── __init__.py
 │   ├── tickers_data.py         # Cargador SSOT desde data/tickers.json + Europa/Watchlist
 │   ├── yahoo_service.py        # yf.download vectorizado + fallback query1/query2 y velas 4h
-│   └── indicators.py           # SMA 50/200, MACD(12,26,9), RSI(14), ATR(14), Golden Cross y Backtest
+│   └── indicators.py           # SMA 50/200, MACD(12,26,9), RSI(14), ATR(14), Golden Cross, Backtest y Agente Estadístico
 ├── src/
 │   ├── components/
 │   │   ├── CandlestickChart.tsx    # Gráfico OHLC SVG interactivo + SMA 50/200 + panel MACD(12,26,9)
 │   │   ├── MethodologyView.tsx
 │   │   ├── OmittedTickersPanel.tsx
-│   │   ├── ResultsTable.tsx        # Tabla ordenable, Watchlist, MACD, RSI, Dist. ATR y micro-barras
+│   │   ├── ResultsTable.tsx        # Tabla ordenable, Watchlist, MACD, RSI, Prob. Rebote (%) y micro-barras
 │   │   ├── ScannerControls.tsx     # Selectores de mercado, filtros técnicos (Golden Cross, Cruce MACD) y Watchlist
-│   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, MACD, gráfico OHLC y Backtest rápido
+│   │   ├── StatisticalAgentPanel.tsx # Panel ejecutivo Modo D: monitorización global (580) y modelos en %
+│   │   ├── StockDetailDrawer.tsx   # Auditoría matemática, MACD, gráfico OHLC, Backtest y Modo D
 │   │   ├── TopBar.tsx
 │   │   ├── UniverseView.tsx
 │   │   └── WatchlistPanel.tsx      # Ventana WATCHLIST permanente en pantalla principal
 │   ├── data/tickersData.ts     # Cargador SSOT desde data/tickers.json
 │   ├── services/
-│   │   ├── marketCache.ts      # Caché Map `${mercado}_${temporalidad}` (TTL 5 min)
+│   │   ├── marketCache.ts      # Caché Map `${mercado}_${temporalidad}` (TTL 5 min) + agregador global
 │   │   ├── watchlistService.ts # Persistencia Watchlist en localStorage + JSON/TXT
 │   │   └── yahooService.ts     # Conector Yahoo Finance con proxies CORS en cascada
 │   ├── types/market.ts
-│   ├── utils/indicators.ts     # Motor matemático TS (SMA, RSI 14, ATR 14, Backtest rápido)
+│   ├── utils/indicators.ts     # Motor matemático TS (SMA, MACD, RSI 14, ATR 14, Backtest y Agente Estadístico)
 │   └── App.tsx
 ├── package.json
 ├── tsconfig.json

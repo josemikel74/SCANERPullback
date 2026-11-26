@@ -3,6 +3,7 @@ import { MethodologyView } from './components/MethodologyView';
 import { OmittedTickersPanel } from './components/OmittedTickersPanel';
 import { ResultsTable } from './components/ResultsTable';
 import { ScannerControls } from './components/ScannerControls';
+import { StatisticalAgentPanel } from './components/StatisticalAgentPanel';
 import { StockDetailDrawer } from './components/StockDetailDrawer';
 import { TopBar } from './components/TopBar';
 import { UniverseView } from './components/UniverseView';
@@ -11,13 +12,18 @@ import {
   type WatchlistDisplayItem,
 } from './components/WatchlistPanel';
 import {
+  ALL_MASTER_TICKERS,
+  DAX_40_TICKERS,
+  IBEX_35_TICKERS,
   MARKETS_METADATA,
+  SP500_TICKERS,
   getTickersByMarket,
   inferTickerCurrencySymbol,
   resolveTickerInfo,
 } from './data/tickersData';
 import {
   clearMarketCache,
+  getAllCachedPlatformResponses,
   getCachedMarketEntry,
   getCachedResponsesForTickers,
   setCachedMarketEntry,
@@ -41,6 +47,8 @@ import type {
   SmaFilter,
   SortColumn,
   SortDirection,
+  StatHorizon,
+  StatModelOption,
   StockAnalysisResult,
   StrategyMode,
   TickerInfo,
@@ -52,6 +60,8 @@ import {
   SMA_LONG_PERIOD,
   SMA_SHORT_PERIOD,
   evaluatePullbackSignals,
+  getStatisticalHorizonStats,
+  getStatisticalProbabilityPct,
   sanitizeCandles,
 } from './utils/indicators';
 
@@ -163,13 +173,17 @@ function mapYahooResponseToStockResult(
       ? evalOutput.bounceMatch50
       : strategy === 'PULLBACK_MACD'
         ? evalOutput.macdPullbackMatch50
-        : evalOutput.proximityMatch50;
+        : strategy === 'STATISTICAL_AGENT'
+          ? evalOutput.proximityMatch50 || evalOutput.bounceMatch50
+          : evalOutput.proximityMatch50;
   const active200 =
     strategy === 'BOUNCE'
       ? evalOutput.bounceMatch200
       : strategy === 'PULLBACK_MACD'
         ? evalOutput.macdPullbackMatch200
-        : evalOutput.proximityMatch200;
+        : strategy === 'STATISTICAL_AGENT'
+          ? evalOutput.proximityMatch200 || evalOutput.bounceMatch200
+          : evalOutput.proximityMatch200;
 
   let matchedSma: StockAnalysisResult['matchedSma'] = null;
   if (active50 && active200) {
@@ -181,7 +195,10 @@ function mapYahooResponseToStockResult(
   }
 
   let signalSummary = 'Fuera de rango de pullback';
-  if (strategy === 'PULLBACK_MACD') {
+  if (strategy === 'STATISTICAL_AGENT') {
+    const sb = evalOutput.statisticalBounce;
+    signalSummary = `Modo D · Prob. Compuesta +5v: ${sb.compositeProb5Pct.toFixed(1)}% (Bayes ${sb.horizon5.bayesianProbPct.toFixed(1)}% · Z-Rev ${sb.zScoreReversionProbPct.toFixed(1)}%)`;
+  } else if (strategy === 'PULLBACK_MACD') {
     if (evalOutput.macdPullbackMatch50 && evalOutput.macdPullbackMatch200) {
       signalSummary = 'Modo C · Pullback en confluencia SMA 50/200 + Cruce al alza MACD';
     } else if (evalOutput.macdPullbackMatch50) {
@@ -248,6 +265,7 @@ function mapYahooResponseToStockResult(
     isMacdBullish: evalOutput.isMacdBullish,
     isGoldenCross: evalOutput.isGoldenCross,
     backtest: evalOutput.backtest,
+    statisticalBounce: evalOutput.statisticalBounce,
     candles: validCandles,
     trend,
     volumeRatio,
@@ -303,6 +321,15 @@ export default function App() {
   const [sortColumn, setSortColumn] = useState<SortColumn>('minSmaDistance');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState<number>(1);
+
+  // Opciones exclusivas de Modo D (Agente Estadístico)
+  const [statModel, setStatModel] = useState<StatModelOption>('COMPOSITE');
+  const [statHorizon, setStatHorizon] = useState<StatHorizon>(5);
+  const [statMinProb, setStatMinProb] = useState<number>(60);
+  const [statGlobalScope, setStatGlobalScope] = useState<boolean>(true);
+  const [isGlobalScanning, setIsGlobalScanning] = useState<boolean>(false);
+  const [globalRawResponses, setGlobalRawResponses] = useState<YahooChartResponse[]>([]);
+  const [globalProcessedCount, setGlobalProcessedCount] = useState<number>(0);
 
   // Estado de ejecución en tiempo real y caché en memoria
   const [scanStatus, setScanStatus] = useState<ScanStatus>('IDLE');
@@ -389,6 +416,81 @@ export default function App() {
     return { evaluatedData: results, recalcMs: elapsed };
   }, [rawResponses, tickerInfoMap, market, proximityThresholdPct, strategy]);
 
+  // Monitorización estadística global en tiempo real de todas las acciones en la plataforma (Modo D)
+  const statisticalPlatformData = useMemo(() => {
+    if (strategy !== 'STATISTICAL_AGENT' || !statGlobalScope) {
+      return evaluatedData;
+    }
+
+    const ibexSet = new Set(IBEX_35_TICKERS.map((t) => t.ticker.toUpperCase()));
+    const daxSet = new Set(DAX_40_TICKERS.map((t) => t.ticker.toUpperCase()));
+    const spSet = new Set(SP500_TICKERS.map((t) => t.ticker.toUpperCase()));
+
+    const inferOriginMarket = (t: string, fallback: MarketId): MarketId => {
+      const u = t.toUpperCase();
+      if (ibexSet.has(u)) return 'IBEX35';
+      if (daxSet.has(u)) return 'DAX';
+      if (spSet.has(u)) return 'SP500';
+      return fallback;
+    };
+
+    const byTicker = new Map<string, { response: YahooChartResponse; market: MarketId }>();
+
+    for (const item of getAllCachedPlatformResponses(timeframe)) {
+      byTicker.set(item.response.ticker.toUpperCase(), item);
+    }
+    for (const res of rawResponses) {
+      byTicker.set(res.ticker.toUpperCase(), {
+        response: res,
+        market: inferOriginMarket(res.ticker, market),
+      });
+    }
+    for (const res of globalRawResponses) {
+      byTicker.set(res.ticker.toUpperCase(), {
+        response: res,
+        market: inferOriginMarket(res.ticker, 'SP500'),
+      });
+    }
+    for (const [k, res] of Object.entries(watchlistLiveResponses)) {
+      if (k.endsWith(`_${timeframe}`)) {
+        byTicker.set(res.ticker.toUpperCase(), {
+          response: res,
+          market: inferOriginMarket(res.ticker, 'WATCHLIST'),
+        });
+      }
+    }
+
+    const results: StockAnalysisResult[] = [];
+    for (const { response, market: origMarket } of byTicker.values()) {
+      const info = resolveTickerInfo(response.ticker);
+      results.push(
+        mapYahooResponseToStockResult(
+          response,
+          info,
+          origMarket,
+          proximityThresholdPct,
+          strategy
+        )
+      );
+    }
+    return results;
+  }, [
+    strategy,
+    statGlobalScope,
+    evaluatedData,
+    timeframe,
+    rawResponses,
+    market,
+    globalRawResponses,
+    watchlistLiveResponses,
+    proximityThresholdPct,
+  ]);
+
+  const activeDataset =
+    strategy === 'STATISTICAL_AGENT' && statGlobalScope
+      ? statisticalPlatformData
+      : evaluatedData;
+
   const watchlistDisplayItems = useMemo<WatchlistDisplayItem[]>(() => {
     const currentMap = new Map<string, StockAnalysisResult>(
       evaluatedData.map((row) => [row.ticker.toUpperCase(), row])
@@ -455,13 +557,15 @@ export default function App() {
 
   const selectedStock = useMemo(() => {
     if (!selectedTicker) return null;
+    const fromActive = activeDataset.find((s) => s.ticker === selectedTicker);
+    if (fromActive) return fromActive;
     const fromEvaluated = evaluatedData.find((s) => s.ticker === selectedTicker);
     if (fromEvaluated) return fromEvaluated;
     return (
       watchlistDisplayItems.find((w) => w.ticker === selectedTicker)?.analysis ??
       null
     );
-  }, [evaluatedData, watchlistDisplayItems, selectedTicker]);
+  }, [activeDataset, evaluatedData, watchlistDisplayItems, selectedTicker]);
 
   // Control anti-errores transparente: tickers omitidos por error de red o historial insuficiente
   const omittedTickers = useMemo<OmittedTickerItem[]>(() => {
@@ -509,7 +613,19 @@ export default function App() {
     let sma50Signals = 0;
     let sma200Signals = 0;
 
-    for (const row of evaluatedData) {
+    for (const row of activeDataset) {
+      if (strategy === 'STATISTICAL_AGENT') {
+        const prob = getStatisticalProbabilityPct(
+          row.statisticalBounce,
+          statModel,
+          statHorizon
+        );
+        if (row.isProximityMatch50 || row.isBounceMatch50) sma50Signals += 1;
+        if (row.isProximityMatch200 || row.isBounceMatch200) sma200Signals += 1;
+        if (prob >= statMinProb) totalSignals += 1;
+        continue;
+      }
+
       const match50 =
         strategy === 'PROXIMITY'
           ? row.isProximityMatch50
@@ -540,13 +656,13 @@ export default function App() {
       sma50Signals,
       sma200Signals,
     };
-  }, [evaluatedData, strategy, smaFilter]);
+  }, [activeDataset, strategy, smaFilter, statModel, statHorizon, statMinProb]);
 
   // Filtrado y ordenación de la tabla
   const filteredAndSortedRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
 
-    const filtered = evaluatedData.filter((row) => {
+    const filtered = activeDataset.filter((row) => {
       if (selectedSector !== 'ALL' && row.sector !== selectedSector) {
         return false;
       }
@@ -577,6 +693,18 @@ export default function App() {
         if (atrDist === null || atrDist > maxAtrFilter) return false;
       }
 
+      if (strategy === 'STATISTICAL_AGENT') {
+        if (smaFilter === 'SMA50' && row.sma50 === null) return false;
+        if (smaFilter === 'SMA200' && row.sma200 === null) return false;
+        if (showAllTickers) return true;
+        const prob = getStatisticalProbabilityPct(
+          row.statisticalBounce,
+          statModel,
+          statHorizon
+        );
+        return prob >= statMinProb;
+      }
+
       if (showAllTickers) {
         return true;
       }
@@ -602,6 +730,20 @@ export default function App() {
     const sorted = [...filtered].sort((a, b) => {
       let comparison = 0;
       switch (sortColumn) {
+        case 'bounceProbability': {
+          const pA = getStatisticalProbabilityPct(
+            a.statisticalBounce,
+            statModel,
+            statHorizon
+          );
+          const pB = getStatisticalProbabilityPct(
+            b.statisticalBounce,
+            statModel,
+            statHorizon
+          );
+          comparison = pA - pB;
+          break;
+        }
         case 'minSmaDistance':
           comparison =
             getMinRelevantSmaDistance(a, smaFilter) -
@@ -669,7 +811,7 @@ export default function App() {
 
     return sorted;
   }, [
-    evaluatedData,
+    activeDataset,
     searchQuery,
     selectedSector,
     onlyGoldenCross,
@@ -682,6 +824,9 @@ export default function App() {
     smaFilter,
     sortColumn,
     sortDirection,
+    statModel,
+    statHorizon,
+    statMinProb,
   ]);
 
   const hydrateFromCacheOrReset = useCallback(
@@ -847,6 +992,7 @@ export default function App() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    setIsGlobalScanning(false);
     setSelectedTicker(null);
     setCurrentPage(1);
     setFromCache(false);
@@ -893,8 +1039,82 @@ export default function App() {
     }
   };
 
+  const handleScanAllPlatform = async () => {
+    abortActiveScan();
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setSelectedTicker(null);
+    setCurrentPage(1);
+    setIsGlobalScanning(true);
+    setStatGlobalScope(true);
+    setScanStatus('SCANNING');
+    setGlobalRawResponses([]);
+    setGlobalProcessedCount(0);
+    setNetworkIncidents([]);
+
+    const ibexSet = new Set(IBEX_35_TICKERS.map((t) => t.ticker.toUpperCase()));
+    const daxSet = new Set(DAX_40_TICKERS.map((t) => t.ticker.toUpperCase()));
+    const spSet = new Set(SP500_TICKERS.map((t) => t.ticker.toUpperCase()));
+
+    try {
+      const { results, incidents, aborted } = await fetchMarketBatch(
+        ALL_MASTER_TICKERS.map((t) => t.ticker),
+        'SP500',
+        timeframe,
+        (update) => {
+          if (controller.signal.aborted) return;
+          setGlobalProcessedCount(update.processed);
+          if (update.latestResult) {
+            const res = update.latestResult;
+            setGlobalRawResponses((prev) => [...prev, res]);
+          }
+          if (update.latestError) {
+            const err = update.latestError;
+            setNetworkIncidents((prev) => [...prev, err]);
+          }
+        },
+        controller.signal
+      );
+
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setIsGlobalScanning(false);
+        if (!aborted && results.length > 0) {
+          const ibexRes = results.filter((r) => ibexSet.has(r.ticker.toUpperCase()));
+          const daxRes = results.filter((r) => daxSet.has(r.ticker.toUpperCase()));
+          const spRes = results.filter((r) => spSet.has(r.ticker.toUpperCase()));
+          const ibexInc = incidents.filter((i) => ibexSet.has(i.ticker.toUpperCase()));
+          const daxInc = incidents.filter((i) => daxSet.has(i.ticker.toUpperCase()));
+          const spInc = incidents.filter((i) => spSet.has(i.ticker.toUpperCase()));
+
+          if (ibexRes.length > 0) setCachedMarketEntry('IBEX35', timeframe, ibexRes, ibexInc);
+          if (daxRes.length > 0) setCachedMarketEntry('DAX', timeframe, daxRes, daxInc);
+          if (spRes.length > 0) setCachedMarketEntry('SP500', timeframe, spRes, spInc);
+          if (ibexRes.length + daxRes.length > 0) {
+            setCachedMarketEntry(
+              'EUROPE',
+              timeframe,
+              [...ibexRes, ...daxRes],
+              [...ibexInc, ...daxInc]
+            );
+          }
+        }
+        setScanStatus(aborted ? 'STOPPED' : 'COMPLETED');
+      }
+    } catch {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setIsGlobalScanning(false);
+        setScanStatus(controller.signal.aborted ? 'STOPPED' : 'COMPLETED');
+      }
+    }
+  };
+
   const handleStopScan = () => {
     abortActiveScan();
+    setIsGlobalScanning(false);
     setScanStatus('STOPPED');
   };
 
@@ -956,34 +1176,57 @@ export default function App() {
       'Golden Cross',
       'Volumen Relativo',
       'Velas Validas',
+      'Prob. Rebote (%)',
+      'Prob. Bayes (%)',
+      'IC Wilson 95 (%)',
+      'Prob. Z-Score (%)',
+      'Z-Score 20',
+      'Retorno Esperado (%)',
       'Resumen Senal',
     ];
 
-    const lines = filteredAndSortedRows.map((r) => [
-      r.ticker,
-      `"${r.name.replace(/"/g, '""')}"`,
-      `"${r.sector}"`,
-      r.market,
-      r.timeframe,
-      fmtEs(r.price),
-      fmtEs(r.changePct),
-      fmtEs(r.sma50),
-      fmtEs(r.distanceSma50Pct),
-      fmtEs(r.sma200),
-      fmtEs(r.distanceSma200Pct),
-      fmtEs(r.rsi14),
-      fmtEs(r.macdLine),
-      fmtEs(r.macdSignal),
-      fmtEs(r.macdHistogram),
-      r.isMacdBullishCross ? 'CRUCE AL ALZA' : r.isMacdBullish ? 'ALCISTA' : 'BAJISTA',
-      fmtEs(r.atr14),
-      fmtEs(r.atrDistance50),
-      fmtEs(r.atrDistance200),
-      r.isGoldenCross ? 'SI' : 'NO',
-      fmtEs(r.volumeRatio),
-      String(r.validCandlesCount),
-      `"${r.signalSummary}"`,
-    ]);
+    const lines = filteredAndSortedRows.map((r) => {
+      const probPct = getStatisticalProbabilityPct(
+        r.statisticalBounce,
+        statModel,
+        statHorizon
+      );
+      const hStats = getStatisticalHorizonStats(
+        r.statisticalBounce,
+        statHorizon
+      );
+      return [
+        r.ticker,
+        `"${r.name.replace(/"/g, '""')}"`,
+        `"${r.sector}"`,
+        r.market,
+        r.timeframe,
+        fmtEs(r.price),
+        fmtEs(r.changePct),
+        fmtEs(r.sma50),
+        fmtEs(r.distanceSma50Pct),
+        fmtEs(r.sma200),
+        fmtEs(r.distanceSma200Pct),
+        fmtEs(r.rsi14),
+        fmtEs(r.macdLine),
+        fmtEs(r.macdSignal),
+        fmtEs(r.macdHistogram),
+        r.isMacdBullishCross ? 'CRUCE AL ALZA' : r.isMacdBullish ? 'ALCISTA' : 'BAJISTA',
+        fmtEs(r.atr14),
+        fmtEs(r.atrDistance50),
+        fmtEs(r.atrDistance200),
+        r.isGoldenCross ? 'SI' : 'NO',
+        fmtEs(r.volumeRatio),
+        String(r.validCandlesCount),
+        fmtEs(probPct),
+        fmtEs(hStats.bayesianProbPct),
+        fmtEs(hStats.wilsonLower95Pct),
+        fmtEs(r.statisticalBounce.zScoreReversionProbPct),
+        fmtEs(r.statisticalBounce.zScore20),
+        fmtEs(hStats.avgReturnPct),
+        `"${r.signalSummary}"`,
+      ];
+    });
 
     const csvBody = [headers.join(';'), ...lines.map((l) => l.join(';'))].join('\r\n');
     const bom = '\uFEFF';
@@ -1092,6 +1335,13 @@ export default function App() {
               strategy={strategy}
               onStrategyChange={(s) => {
                 setStrategy(s);
+                if (s === 'STATISTICAL_AGENT') {
+                  setSortColumn('bounceProbability');
+                  setSortDirection('desc');
+                } else if (sortColumn === 'bounceProbability') {
+                  setSortColumn('minSmaDistance');
+                  setSortDirection('asc');
+                }
                 setCurrentPage(1);
               }}
               proximityThresholdPct={proximityThresholdPct}
@@ -1151,6 +1401,46 @@ export default function App() {
               watchlistTickers={watchlistTickers}
             />
 
+            {/* Panel exclusivo Modo D: Agente Estadístico y Probabilidades */}
+            {strategy === 'STATISTICAL_AGENT' && (
+              <StatisticalAgentPanel
+                rows={filteredAndSortedRows}
+                allMonitoredCount={activeDataset.length}
+                totalPlatformCount={ALL_MASTER_TICKERS.length}
+                timeframe={timeframe}
+                scanStatus={scanStatus}
+                isGlobalScanning={isGlobalScanning}
+                globalProcessedCount={globalProcessedCount}
+                statModel={statModel}
+                onStatModelChange={(m) => {
+                  setStatModel(m);
+                  setCurrentPage(1);
+                }}
+                statHorizon={statHorizon}
+                onStatHorizonChange={(h) => {
+                  setStatHorizon(h);
+                  setCurrentPage(1);
+                }}
+                statMinProb={statMinProb}
+                onStatMinProbChange={(p) => {
+                  setStatMinProb(p);
+                  setCurrentPage(1);
+                }}
+                statGlobalScope={statGlobalScope}
+                onToggleStatGlobalScope={(val) => {
+                  setStatGlobalScope(val);
+                  setCurrentPage(1);
+                }}
+                onScanAllPlatform={() => void handleScanAllPlatform()}
+                onStopScan={handleStopScan}
+                onSelectStock={(stock) =>
+                  setSelectedTicker((prev) =>
+                    prev === stock.ticker ? null : stock.ticker
+                  )
+                }
+              />
+            )}
+
             {/* Tira de KPIs */}
             <section
               aria-label="Resumen cuantitativo del escaneo"
@@ -1158,16 +1448,23 @@ export default function App() {
             >
               <div className="p-4 space-y-1">
                 <span className="block text-xs font-medium text-[#64748B]">
-                  Total Analizados
+                  {strategy === 'STATISTICAL_AGENT' && statGlobalScope
+                    ? 'Monitorizadas (Plataforma)'
+                    : 'Total Analizados'}
                 </span>
                 <span className="block text-xl font-bold font-mono tabular-nums text-[#0F172A]">
-                  {evaluatedData.length} / {totalMarketTickers}
+                  {activeDataset.length} /{' '}
+                  {strategy === 'STATISTICAL_AGENT' && statGlobalScope
+                    ? ALL_MASTER_TICKERS.length
+                    : totalMarketTickers}
                 </span>
               </div>
 
               <div className="p-4 space-y-1">
                 <span className="block text-xs font-medium text-[#64748B]">
-                  Pullbacks Detectados
+                  {strategy === 'STATISTICAL_AGENT'
+                    ? `Prob. Rebote ≥ ${statMinProb}%`
+                    : 'Pullbacks Detectados'}
                 </span>
                 <span className="block text-xl font-bold font-mono tabular-nums text-[#1D4ED8]">
                   {metrics.totalSignals}
@@ -1232,8 +1529,18 @@ export default function App() {
               rows={filteredAndSortedRows}
               market={market}
               timeframe={timeframe}
-              totalMarketTickers={totalMarketTickers}
-              scannedCount={processedCount}
+              totalMarketTickers={
+                strategy === 'STATISTICAL_AGENT' && statGlobalScope
+                  ? ALL_MASTER_TICKERS.length
+                  : totalMarketTickers
+              }
+              scannedCount={
+                strategy === 'STATISTICAL_AGENT' && statGlobalScope
+                  ? isGlobalScanning
+                    ? globalProcessedCount
+                    : activeDataset.length
+                  : processedCount
+              }
               incidentCount={networkIncidents.length}
               fromCache={fromCache}
               recalcMs={recalcMs}
@@ -1253,13 +1560,20 @@ export default function App() {
               watchlistSet={watchlistSet}
               onToggleWatchlist={handleToggleWatchlist}
               onResetFilters={handleResetFilters}
-              onStartScan={() => void handleStartScan()}
+              onStartScan={() =>
+                void (strategy === 'STATISTICAL_AGENT' && statGlobalScope
+                  ? handleScanAllPlatform()
+                  : handleStartScan())
+              }
               onExportCsv={handleExportCsv}
               onCopyTickers={() => void handleCopyTickers()}
               copiedCount={copiedCount}
               currentPage={currentPage}
               pageSize={PAGE_SIZE}
               onPageChange={setCurrentPage}
+              statModel={statModel}
+              statHorizon={statHorizon}
+              statMinProb={statMinProb}
             />
 
             {/* Panel desplegable discreto de control anti-errores */}

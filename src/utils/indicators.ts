@@ -4,6 +4,10 @@ import type {
   PullbackBacktestStats,
   SmaDiagnostics,
   SmaEvaluationOutput,
+  StatHorizon,
+  StatModelOption,
+  StatisticalBounceAnalysis,
+  StatisticalHorizonStats,
 } from '../types/market';
 
 export const SMA_SHORT_PERIOD = 50;
@@ -415,6 +419,331 @@ export function runPullbackBacktest(
   };
 }
 
+function clamp(val: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, val));
+}
+
+/**
+ * Función de distribución acumulada normal estándar Φ(x) mediante aproximación de Abramowitz & Stegun.
+ */
+export function normalCdf(x: number): number {
+  const sign = x < 0 ? -1 : 1;
+  const absX = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * absX);
+  const y =
+    1 -
+    (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
+      0.254829592) *
+      t) *
+      Math.exp(-absX * absX);
+  return 0.5 * (1 + sign * y);
+}
+
+/**
+ * Cota inferior del intervalo de confianza de Wilson al 95% (z = 1.96) expresada en porcentaje.
+ */
+export function wilsonLowerBoundPct(
+  wins: number,
+  sampleSize: number,
+  z = 1.96
+): number {
+  if (sampleSize <= 0) return 0;
+  const p = clamp(wins / sampleSize, 0, 1);
+  const z2 = z * z;
+  const denom = 1 + z2 / sampleSize;
+  const center = p + z2 / (2 * sampleSize);
+  const margin =
+    z * Math.sqrt((p * (1 - p) + z2 / (4 * sampleSize)) / sampleSize);
+  return clamp(((center - margin) / denom) * 100, 0, 100);
+}
+
+function emptyHorizonStats(horizonBars: StatHorizon): StatisticalHorizonStats {
+  return {
+    horizonBars,
+    sampleSize: 0,
+    winsCount: 0,
+    empiricalWinRatePct: null,
+    bayesianProbPct: 50,
+    wilsonLower95Pct: 0,
+    avgReturnPct: null,
+  };
+}
+
+export function emptyStatisticalBounce(): StatisticalBounceAnalysis {
+  return {
+    zScore20: null,
+    zScoreReversionProbPct: 50,
+    supportConfirmationProbPct: 50,
+    volatility20Pct: null,
+    horizon3: emptyHorizonStats(3),
+    horizon5: emptyHorizonStats(5),
+    horizon10: emptyHorizonStats(10),
+    compositeProb3Pct: 50,
+    compositeProb5Pct: 50,
+    compositeProb10Pct: 50,
+    confidenceLabel: 'BAJA',
+  };
+}
+
+function evaluateHorizonConditional(
+  closes: number[],
+  sma50Series: Array<number | null>,
+  sma20Series: Array<number | null>,
+  rsiSeries: Array<number | null>,
+  horizonBars: StatHorizon
+): StatisticalHorizonStats {
+  const n = closes.length;
+  const startIdx = n >= 65 ? 50 : 20;
+  const endIdx = n - 1 - horizonBars;
+  if (endIdx < startIdx) {
+    return emptyHorizonStats(horizonBars);
+  }
+
+  let sampleSize = 0;
+  let winsCount = 0;
+  let returnSum = 0;
+
+  for (let i = startIdx; i <= endIdx; i++) {
+    const c = closes[i];
+    const s50 = sma50Series[i];
+    const s20 = sma20Series[i];
+    const r14 = rsiSeries[i];
+
+    const nearSma50 = s50 !== null && s50 > 0 && Math.abs((c - s50) / s50) <= 0.03;
+    const belowSma20 = s20 !== null && s20 > 0 && c < s20;
+    const rsiPullback = r14 !== null && r14 <= 50;
+
+    if (nearSma50 || belowSma20 || rsiPullback) {
+      const fwdRetPct = ((closes[i + horizonBars] - c) / c) * 100;
+      sampleSize += 1;
+      if (fwdRetPct > 0) {
+        winsCount += 1;
+      }
+      returnSum += fwdRetPct;
+    }
+  }
+
+  const empiricalWinRatePct =
+    sampleSize > 0 ? (winsCount / sampleSize) * 100 : null;
+  // Posterior Bayesiano Beta(2, 2) centrado en prior neutro 50%
+  const bayesianProbPct = ((winsCount + 2) / (sampleSize + 4)) * 100;
+  const wilsonLower95 = wilsonLowerBoundPct(winsCount, sampleSize, 1.96);
+  const avgReturnPct = sampleSize > 0 ? returnSum / sampleSize : null;
+
+  return {
+    horizonBars,
+    sampleSize,
+    winsCount,
+    empiricalWinRatePct,
+    bayesianProbPct,
+    wilsonLower95Pct: wilsonLower95,
+    avgReturnPct,
+  };
+}
+
+export function calculateStatisticalBounceAnalysis(
+  validCandles: OHLCVCandle[],
+  closes: number[],
+  sma50: number | null,
+  sma200: number | null,
+  slope50Positive: boolean,
+  rsi14: number | null,
+  isMacdBullishCross: boolean,
+  curMacdHist: number | null,
+  prevMacdHist: number | null
+): StatisticalBounceAnalysis {
+  const n = closes.length;
+  if (n < 21) {
+    return emptyStatisticalBounce();
+  }
+
+  // Z-Score de 20 velas y volatilidad logarítmica
+  const win20 = closes.slice(-20);
+  const mean20 = win20.reduce((acc, v) => acc + v, 0) / 20;
+  const variance20 =
+    win20.reduce((acc, v) => acc + (v - mean20) * (v - mean20), 0) / 19;
+  const std20 = Math.sqrt(variance20);
+  const currentClose = closes[n - 1];
+  const zScore20 = std20 > 1e-12 ? (currentClose - mean20) / std20 : 0;
+  const zScoreReversionProbPct = clamp(normalCdf(-zScore20) * 100, 5, 95);
+
+  const logReturns: number[] = [];
+  for (let i = n - 20; i < n; i++) {
+    if (closes[i - 1] > 0 && closes[i] > 0) {
+      logReturns.push(Math.log(closes[i] / closes[i - 1]));
+    }
+  }
+  let volatility20Pct: number | null = null;
+  if (logReturns.length >= 2) {
+    const lrMean =
+      logReturns.reduce((acc, v) => acc + v, 0) / logReturns.length;
+    const lrVar =
+      logReturns.reduce((acc, v) => acc + (v - lrMean) * (v - lrMean), 0) /
+      (logReturns.length - 1);
+    volatility20Pct = Math.sqrt(lrVar) * 100;
+  }
+
+  // Volumen relativo de la última vela
+  const recentVols = validCandles
+    .slice(-21, -1)
+    .map((c) => c.volume)
+    .filter((v) => v > 0);
+  const avgVol =
+    recentVols.length > 0
+      ? recentVols.reduce((acc, v) => acc + v, 0) / recentVols.length
+      : 0;
+  const lastVol = validCandles[n - 1].volume;
+  const volRatio = avgVol > 0 && lastVol > 0 ? lastVol / avgVol : 1;
+
+  // Probabilidad logística de soporte técnico y momentum
+  let logit = 0;
+  if (sma50 !== null && sma50 > 0) {
+    const d50 = ((currentClose - sma50) / sma50) * 100;
+    logit += slope50Positive ? 0.35 : -0.25;
+    if (d50 >= -2.5 && d50 <= 2.5) {
+      logit += 0.45;
+    } else if (d50 < -5.0) {
+      logit += 0.15;
+    } else if (d50 > 5.0) {
+      logit -= 0.3;
+    }
+  }
+  if (sma200 !== null && sma200 > 0) {
+    const d200 = ((currentClose - sma200) / sma200) * 100;
+    if (currentClose > sma200) logit += 0.25;
+    if (Math.abs(d200) <= 2.5) logit += 0.35;
+  }
+  if (rsi14 !== null) {
+    if (rsi14 <= 35) logit += 0.55;
+    else if (rsi14 <= 50) logit += 0.3;
+    else if (rsi14 >= 70) logit -= 0.55;
+  }
+  if (isMacdBullishCross) {
+    logit += 0.65;
+  } else if (
+    curMacdHist !== null &&
+    prevMacdHist !== null &&
+    curMacdHist > prevMacdHist
+  ) {
+    logit += 0.3;
+  } else if (
+    curMacdHist !== null &&
+    curMacdHist < 0 &&
+    prevMacdHist !== null &&
+    curMacdHist < prevMacdHist
+  ) {
+    logit -= 0.2;
+  }
+  if (volRatio >= 1.2) {
+    logit += 0.2;
+  }
+
+  const supportConfirmationProbPct = clamp(
+    (1 / (1 + Math.exp(-logit))) * 100,
+    12,
+    92
+  );
+
+  const sma50Series = calculateSMASeries(closes, SMA_SHORT_PERIOD);
+  const sma20Series = calculateSMASeries(closes, 20);
+  const rsiSeries = calculateRSISeries(closes, RSI_DEFAULT_PERIOD);
+
+  const horizon3 = evaluateHorizonConditional(
+    closes,
+    sma50Series,
+    sma20Series,
+    rsiSeries,
+    3
+  );
+  const horizon5 = evaluateHorizonConditional(
+    closes,
+    sma50Series,
+    sma20Series,
+    rsiSeries,
+    5
+  );
+  const horizon10 = evaluateHorizonConditional(
+    closes,
+    sma50Series,
+    sma20Series,
+    rsiSeries,
+    10
+  );
+
+  const combine = (bayesPct: number) =>
+    clamp(
+      0.45 * bayesPct +
+        0.25 * zScoreReversionProbPct +
+        0.3 * supportConfirmationProbPct,
+      5,
+      95
+    );
+
+  const compositeProb3Pct = combine(horizon3.bayesianProbPct);
+  const compositeProb5Pct = combine(horizon5.bayesianProbPct);
+  const compositeProb10Pct = combine(horizon10.bayesianProbPct);
+
+  let confidenceLabel: StatisticalBounceAnalysis['confidenceLabel'] = 'BAJA';
+  if (horizon5.sampleSize >= 20 && compositeProb5Pct >= 65) {
+    confidenceLabel = 'ALTA';
+  } else if (horizon5.sampleSize >= 10 && compositeProb5Pct >= 55) {
+    confidenceLabel = 'MEDIA';
+  } else if (horizon5.sampleSize >= 5) {
+    confidenceLabel = 'MODERADA';
+  }
+
+  return {
+    zScore20,
+    zScoreReversionProbPct,
+    supportConfirmationProbPct,
+    volatility20Pct,
+    horizon3,
+    horizon5,
+    horizon10,
+    compositeProb3Pct,
+    compositeProb5Pct,
+    compositeProb10Pct,
+    confidenceLabel,
+  };
+}
+
+export function getStatisticalHorizonStats(
+  stats: StatisticalBounceAnalysis,
+  horizon: StatHorizon
+): StatisticalHorizonStats {
+  if (horizon === 3) return stats.horizon3;
+  if (horizon === 10) return stats.horizon10;
+  return stats.horizon5;
+}
+
+export function getStatisticalProbabilityPct(
+  stats: StatisticalBounceAnalysis,
+  model: StatModelOption,
+  horizon: StatHorizon
+): number {
+  const hStats = getStatisticalHorizonStats(stats, horizon);
+  switch (model) {
+    case 'EMPIRICAL':
+      return hStats.bayesianProbPct;
+    case 'ZSCORE':
+      return stats.zScoreReversionProbPct;
+    case 'WILSON_95':
+      return hStats.wilsonLower95Pct;
+    case 'COMPOSITE':
+    default:
+      if (horizon === 3) return stats.compositeProb3Pct;
+      if (horizon === 10) return stats.compositeProb10Pct;
+      return stats.compositeProb5Pct;
+  }
+}
+
+export function getStatisticalExpectedReturnPct(
+  stats: StatisticalBounceAnalysis,
+  horizon: StatHorizon
+): number | null {
+  return getStatisticalHorizonStats(stats, horizon).avgReturnPct;
+}
+
 function emptyDiagnostics(): SmaDiagnostics {
   return {
     smaCurrent: null,
@@ -560,6 +889,7 @@ export function evaluatePullbackSignals(
         sma50: emptyBacktestSummary(),
         sma200: emptyBacktestSummary(),
       },
+      statisticalBounce: emptyStatisticalBounce(),
     };
   }
 
@@ -622,6 +952,18 @@ export function evaluatePullbackSignals(
 
   const isGoldenCross = sma50 !== null && sma200 !== null && sma50 > sma200;
   const backtest = runPullbackBacktest(validCandles, shortPeriod, longPeriod);
+  const prevMacdHist = n >= 2 ? macdSeries.histogram[n - 2] : null;
+  const statisticalBounce = calculateStatisticalBounceAnalysis(
+    validCandles,
+    closes,
+    sma50,
+    sma200,
+    eval50.diagnostics.slopePositiveOrFlat,
+    rsi14,
+    isMacdBullishCross,
+    macdHistogram,
+    prevMacdHist
+  );
 
   return {
     validCandlesCount: validCandles.length,
@@ -648,5 +990,6 @@ export function evaluatePullbackSignals(
     isMacdBullish,
     isGoldenCross,
     backtest,
+    statisticalBounce,
   };
 }

@@ -15,7 +15,7 @@ export function MethodologyView() {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 pt-2">
           <div className="border border-[#E2E8F0] rounded-xl p-5 space-y-2.5 bg-[#F8FAFC]">
             <h3 className="text-sm font-bold text-[#0F172A]">
               Modo A · Zona de Proximidad (±%)
@@ -50,6 +50,19 @@ export function MethodologyView() {
               alcista en <span className="font-mono">MACD (12, 26, 9)</span>:{' '}
               <span className="font-mono">MACD<sub>t-1</sub> ≤ Señal<sub>t-1</sub></span> y{' '}
               <span className="font-mono">MACD<sub>t</sub> &gt; Señal<sub>t</sub></span>.
+            </p>
+          </div>
+
+          <div className="border border-[#C7D2FE] rounded-xl p-5 space-y-2.5 bg-[#EEF2FF]/70">
+            <h3 className="text-sm font-bold text-[#0F172A]">
+              Modo D · Agente Estadístico (%)
+            </h3>
+            <p className="text-xs text-[#475569] leading-relaxed">
+              Monitoriza en tiempo real toda la plataforma y estima la probabilidad porcentual de rebote al alza a{' '}
+              <span className="font-mono">+3 / +5 / +10</span> velas mediante posterior{' '}
+              <span className="font-mono">Beta(2,2)</span> bayesiano, reversión{' '}
+              <span className="font-mono">Φ(-Z<sub>20</sub>)</span>, soporte logístico e intervalo{' '}
+              <span className="font-mono">Wilson 95%</span>.
             </p>
           </div>
         </div>

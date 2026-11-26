@@ -140,3 +140,44 @@ export function getCachedResponsesForTickers(
 
   return result;
 }
+
+/**
+ * Devuelve todas las series OHLC vigentes en caché en todos los mercados de la plataforma,
+ * deduplicadas por ticker y priorizando la temporalidad activa.
+ */
+export function getAllCachedPlatformResponses(
+  preferredTimeframe: Timeframe
+): Array<{ response: YahooChartResponse; market: MarketId }> {
+  const now = Date.now();
+  const validEntries: MarketCacheEntry[] = [];
+
+  for (const [key, entry] of marketSeriesCache.entries()) {
+    if (now > entry.expiresAt) {
+      marketSeriesCache.delete(key);
+    } else {
+      validEntries.push(entry);
+    }
+  }
+
+  validEntries.sort((a, b) => {
+    const prefA = a.timeframe === preferredTimeframe ? 1 : 0;
+    const prefB = b.timeframe === preferredTimeframe ? 1 : 0;
+    if (prefA !== prefB) return prefB - prefA;
+    return b.cachedAt - a.cachedAt;
+  });
+
+  const seen = new Set<string>();
+  const aggregated: Array<{ response: YahooChartResponse; market: MarketId }> = [];
+
+  for (const entry of validEntries) {
+    for (const res of entry.responses) {
+      const upper = res.ticker.toUpperCase();
+      if (!seen.has(upper)) {
+        seen.add(upper);
+        aggregated.push({ response: res, market: entry.market });
+      }
+    }
+  }
+
+  return aggregated;
+}

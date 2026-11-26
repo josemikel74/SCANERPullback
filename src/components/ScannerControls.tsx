@@ -278,6 +278,17 @@ export function ScannerControls({
             >
               Modo C: Pullback + Cruce MACD
             </button>
+            <button
+              type="button"
+              onClick={() => onStrategyChange('STATISTICAL_AGENT')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${
+                strategy === 'STATISTICAL_AGENT'
+                  ? 'bg-[#EEF2FF] text-[#3730A3] shadow-xs border border-[#C7D2FE]'
+                  : 'text-[#64748B] hover:text-[#0F172A] border border-transparent'
+              }`}
+            >
+              Modo D: Agente Estadístico
+            </button>
           </div>
 
           {(strategy === 'PROXIMITY' || strategy === 'PULLBACK_MACD') && (

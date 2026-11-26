@@ -3,6 +3,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   ArrowUpRight,
+  BarChart3,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -22,10 +23,16 @@ import type {
   SmaFilter,
   SortColumn,
   SortDirection,
+  StatHorizon,
+  StatModelOption,
   StockAnalysisResult,
   StrategyMode,
   Timeframe,
 } from '../types/market';
+import {
+  getStatisticalHorizonStats,
+  getStatisticalProbabilityPct,
+} from '../utils/indicators';
 
 interface ResultsTableProps {
   rows: StockAnalysisResult[];
@@ -55,6 +62,9 @@ interface ResultsTableProps {
   currentPage: number;
   pageSize: number;
   onPageChange: (page: number) => void;
+  statModel: StatModelOption;
+  statHorizon: StatHorizon;
+  statMinProb: number;
 }
 
 function formatPrice(value: number | null, symbol: '€' | '$'): string {
@@ -217,6 +227,9 @@ export function ResultsTable({
   currentPage,
   pageSize,
   onPageChange,
+  statModel,
+  statHorizon,
+  statMinProb,
 }: ResultsTableProps) {
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
@@ -251,6 +264,16 @@ export function ResultsTable({
           row.isMacdPullbackMatch200,
       };
     }
+    if (strategy === 'STATISTICAL_AGENT') {
+      return {
+        m50:
+          (smaFilter === 'ALL' || smaFilter === 'SMA50') &&
+          (row.isProximityMatch50 || row.isBounceMatch50),
+        m200:
+          (smaFilter === 'ALL' || smaFilter === 'SMA200') &&
+          (row.isProximityMatch200 || row.isBounceMatch200),
+      };
+    }
     return {
       m50: (smaFilter === 'ALL' || smaFilter === 'SMA50') && row.isProximityMatch50,
       m200: (smaFilter === 'ALL' || smaFilter === 'SMA200') && row.isProximityMatch200,
@@ -258,6 +281,29 @@ export function ResultsTable({
   };
 
   const renderSignalCell = (row: StockAnalysisResult) => {
+    if (strategy === 'STATISTICAL_AGENT') {
+      const prob = getStatisticalProbabilityPct(
+        row.statisticalBounce,
+        statModel,
+        statHorizon
+      );
+      const conf = row.statisticalBounce.confidenceLabel;
+      const colorCls =
+        prob >= 65
+          ? 'text-[#059669]'
+          : prob >= 55
+            ? 'text-[#3730A3]'
+            : 'text-[#64748B]';
+      return (
+        <div className={`inline-flex items-center gap-1.5 text-xs font-semibold tabular-nums ${colorCls}`}>
+          <BarChart3 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>
+            {prob.toFixed(1)}% · {conf}
+          </span>
+        </div>
+      );
+    }
+
     const { m50, m200 } = getActiveSmaMatches(row);
     const hasMatch = m50 || m200;
 
@@ -333,7 +379,9 @@ export function ResultsTable({
               ? `Proximidad ±${proximityThresholdPct.toFixed(1)}%`
               : strategy === 'PULLBACK_MACD'
                 ? `Modo C: Pullback ±${proximityThresholdPct.toFixed(1)}% + Cruce MACD ↑`
-                : 'Toque y Rebote Estricto'}
+                : strategy === 'STATISTICAL_AGENT'
+                  ? `Modo D: Agente Estadístico (+${statHorizon}v · ≥${statMinProb}%)`
+                  : 'Toque y Rebote Estricto'}
           </span>
           {scannedCount > 0 && (
             <>
@@ -579,6 +627,18 @@ export function ResultsTable({
                       {renderSortIcon('volumeRatio')}
                     </button>
                   </th>
+                  {strategy === 'STATISTICAL_AGENT' && (
+                    <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => onSort('bounceProbability')}
+                        className="inline-flex items-center justify-end gap-1.5 hover:text-[#0F172A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 rounded"
+                      >
+                        <span>Prob. Rebote (%)</span>
+                        {renderSortIcon('bounceProbability')}
+                      </button>
+                    </th>
+                  )}
                   <th className="py-2.5 px-3 whitespace-nowrap">Media</th>
                   <th className="py-2.5 pl-3 pr-5 whitespace-nowrap">Estado</th>
                 </tr>
@@ -733,6 +793,41 @@ export function ResultsTable({
                       <td className="py-2 px-3 text-right font-mono text-[#475569] tabular-nums whitespace-nowrap">
                         {row.volumeRatio.toFixed(2).replace('.', ',')}x
                       </td>
+                      {strategy === 'STATISTICAL_AGENT' && (() => {
+                        const probPct = getStatisticalProbabilityPct(
+                          row.statisticalBounce,
+                          statModel,
+                          statHorizon
+                        );
+                        const hStats = getStatisticalHorizonStats(
+                          row.statisticalBounce,
+                          statHorizon
+                        );
+                        return (
+                          <td className="py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                            <div className="inline-flex flex-col items-end leading-tight">
+                              <span
+                                className={`font-bold ${
+                                  probPct >= 65
+                                    ? 'text-[#059669]'
+                                    : probPct >= 55
+                                      ? 'text-[#3730A3]'
+                                      : 'text-[#64748B]'
+                                }`}
+                              >
+                                {probPct.toFixed(1)}%
+                              </span>
+                              <span className="text-[10px] text-[#64748B]">
+                                Ret:{' '}
+                                {hStats.avgReturnPct !== null
+                                  ? `${hStats.avgReturnPct >= 0 ? '+' : ''}${hStats.avgReturnPct.toFixed(2)}%`
+                                  : '—'}{' '}
+                                · n={hStats.sampleSize}
+                              </span>
+                            </div>
+                          </td>
+                        );
+                      })()}
                       <td className="py-2 px-3 whitespace-nowrap">
                         <SmaBadge match50={m50} match200={m200} />
                       </td>

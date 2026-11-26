@@ -7,7 +7,15 @@ export type MarketId = 'IBEX35' | 'DAX' | 'SP500' | 'EUROPE' | 'WATCHLIST';
 
 export type Timeframe = '1h' | '4h' | '1d' | '1w';
 
-export type StrategyMode = 'PROXIMITY' | 'BOUNCE' | 'PULLBACK_MACD';
+export type StrategyMode =
+  | 'PROXIMITY'
+  | 'BOUNCE'
+  | 'PULLBACK_MACD'
+  | 'STATISTICAL_AGENT';
+
+export type StatModelOption = 'COMPOSITE' | 'EMPIRICAL' | 'ZSCORE' | 'WILSON_95';
+
+export type StatHorizon = 3 | 5 | 10;
 
 export type SmaFilter = 'ALL' | 'SMA50' | 'SMA200';
 
@@ -27,6 +35,7 @@ export type MaxAtrDistanceFilter = 0 | 0.5 | 1.0 | 1.5;
 
 export type SortColumn =
   | 'minSmaDistance'
+  | 'bounceProbability'
   | 'ticker'
   | 'price'
   | 'changePct'
@@ -99,6 +108,30 @@ export interface PullbackBacktestStats {
   sma200: BacktestSmaSummary;
 }
 
+export interface StatisticalHorizonStats {
+  horizonBars: StatHorizon;
+  sampleSize: number;
+  winsCount: number;
+  empiricalWinRatePct: number | null;
+  bayesianProbPct: number;
+  wilsonLower95Pct: number;
+  avgReturnPct: number | null;
+}
+
+export interface StatisticalBounceAnalysis {
+  zScore20: number | null;
+  zScoreReversionProbPct: number;
+  supportConfirmationProbPct: number;
+  volatility20Pct: number | null;
+  horizon3: StatisticalHorizonStats;
+  horizon5: StatisticalHorizonStats;
+  horizon10: StatisticalHorizonStats;
+  compositeProb3Pct: number;
+  compositeProb5Pct: number;
+  compositeProb10Pct: number;
+  confidenceLabel: 'ALTA' | 'MEDIA' | 'MODERADA' | 'BAJA';
+}
+
 export interface StockAnalysisResult {
   ticker: string;
   name: string;
@@ -136,6 +169,7 @@ export interface StockAnalysisResult {
   isMacdBullish: boolean;
   isGoldenCross: boolean;
   backtest: PullbackBacktestStats;
+  statisticalBounce: StatisticalBounceAnalysis;
   candles: OHLCVCandle[];
   trend: TrendDirection;
   volumeRatio: number;
@@ -214,4 +248,5 @@ export interface SmaEvaluationOutput {
   isMacdBullish: boolean;
   isGoldenCross: boolean;
   backtest: PullbackBacktestStats;
+  statisticalBounce: StatisticalBounceAnalysis;
 }
