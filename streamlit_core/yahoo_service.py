@@ -135,8 +135,11 @@ def _fetch_via_yfinance(ticker: str, timeframe: str) -> Optional[Dict[str, Any]]
         return None
 
     interval, period = map_timeframe_to_yahoo_params(timeframe)
-    hist = _yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
-    return _dataframe_to_result(hist, ticker, timeframe)
+    try:
+        hist = _yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+        return _dataframe_to_result(hist, ticker, timeframe)
+    except Exception:
+        return None
 
 
 def _fetch_chunk_via_yfinance_download(

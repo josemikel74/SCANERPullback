@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
 import re
 import time
@@ -16,14 +18,19 @@ except ImportError:
     go = None
     make_subplots = None
 
-from streamlit_core.indicators import (
-    SMA_LONG_PERIOD,
-    SMA_SHORT_PERIOD,
-    calculate_macd_series,
-    calculate_sma_series,
-    evaluate_pullback_signals,
-    sanitize_candles,
-)
+import streamlit_core.indicators as _indicators_mod
+
+if "macd_pullback_match_50" not in getattr(
+    getattr(_indicators_mod, "SmaEvaluation", None), "__dataclass_fields__", {}
+):
+    _indicators_mod = importlib.reload(_indicators_mod)
+
+SMA_LONG_PERIOD = _indicators_mod.SMA_LONG_PERIOD
+SMA_SHORT_PERIOD = _indicators_mod.SMA_SHORT_PERIOD
+calculate_macd_series = _indicators_mod.calculate_macd_series
+calculate_sma_series = _indicators_mod.calculate_sma_series
+evaluate_pullback_signals = _indicators_mod.evaluate_pullback_signals
+sanitize_candles = _indicators_mod.sanitize_candles
 from streamlit_core.tickers_data import (
     DAX_40_TICKERS,
     EUROPE_TICKERS,
@@ -201,12 +208,14 @@ def get_cached_responses_for_watchlist(
 
     # Priorizar respuestas obtenidas específicamente en tiempo real desde el visor del Watchlist
     live_entries: List[Dict[str, Any]] = []
-    for k in list(st.session_state.watchlist_live_cache.keys()):
-        entry = st.session_state.watchlist_live_cache[k]
-        if now > entry["expires_at"]:
-            del st.session_state.watchlist_live_cache[k]
-        else:
-            live_entries.append(entry)
+    live_cache = st.session_state.get("watchlist_live_cache")
+    if isinstance(live_cache, dict):
+        for k in list(live_cache.keys()):
+            entry = live_cache[k]
+            if not isinstance(entry, dict) or "expires_at" not in entry or now > entry["expires_at"]:
+                del live_cache[k]
+            else:
+                live_entries.append(entry)
 
     live_entries.sort(
         key=lambda e: (1 if e["timeframe"] == preferred_timeframe else 0, e["cached_at"]),
@@ -238,7 +247,7 @@ def evaluate_cached_market(
 
     for res in responses:
         ticker = res["ticker"]
-        info = ticker_info_map.get(ticker)
+        info = ticker_info_map.get(ticker) or ticker_info_map.get(ticker.upper())
         if not info:
             continue
 
@@ -264,6 +273,26 @@ def evaluate_cached_market(
         vol_ratio = (last_c.volume / avg_vol) if (avg_vol > 0 and last_c.volume > 0) else 1.0
         symbol = infer_currency_symbol(ticker, fallback_symbol)
 
+        prox_50 = bool(getattr(eval_out, "proximity_match_50", False))
+        prox_200 = bool(getattr(eval_out, "proximity_match_200", False))
+        bounce_50 = bool(getattr(eval_out, "bounce_match_50", False))
+        bounce_200 = bool(getattr(eval_out, "bounce_match_200", False))
+        is_macd_cross = bool(getattr(eval_out, "is_macd_bullish_cross", False))
+        macd_pb_50 = bool(
+            getattr(
+                eval_out,
+                "macd_pullback_match_50",
+                (prox_50 or bounce_50) and is_macd_cross,
+            )
+        )
+        macd_pb_200 = bool(
+            getattr(
+                eval_out,
+                "macd_pullback_match_200",
+                (prox_200 or bounce_200) and is_macd_cross,
+            )
+        )
+
         rows.append(
             {
                 "ticker": ticker,
@@ -276,32 +305,32 @@ def evaluate_cached_market(
                 "high": last_c.high,
                 "low": last_c.low,
                 "change_pct": change_pct,
-                "sma_50": eval_out.sma_50,
-                "sma_200": eval_out.sma_200,
-                "dist_50": eval_out.distance_sma_50_pct,
-                "dist_200": eval_out.distance_sma_200_pct,
-                "prox_50": eval_out.proximity_match_50,
-                "prox_200": eval_out.proximity_match_200,
-                "bounce_50": eval_out.bounce_match_50,
-                "bounce_200": eval_out.bounce_match_200,
-                "macd_pullback_50": eval_out.macd_pullback_match_50,
-                "macd_pullback_200": eval_out.macd_pullback_match_200,
+                "sma_50": getattr(eval_out, "sma_50", None),
+                "sma_200": getattr(eval_out, "sma_200", None),
+                "dist_50": getattr(eval_out, "distance_sma_50_pct", None),
+                "dist_200": getattr(eval_out, "distance_sma_200_pct", None),
+                "prox_50": prox_50,
+                "prox_200": prox_200,
+                "bounce_50": bounce_50,
+                "bounce_200": bounce_200,
+                "macd_pullback_50": macd_pb_50,
+                "macd_pullback_200": macd_pb_200,
                 "diag_50": eval_out.diagnostics_50,
                 "diag_200": eval_out.diagnostics_200,
-                "rsi_14": eval_out.rsi_14,
-                "atr_14": eval_out.atr_14,
-                "atr_dist_50": eval_out.atr_distance_50,
-                "atr_dist_200": eval_out.atr_distance_200,
-                "macd_line": eval_out.macd_line,
-                "macd_signal": eval_out.macd_signal,
-                "macd_histogram": eval_out.macd_histogram,
-                "is_macd_bullish_cross": eval_out.is_macd_bullish_cross,
-                "is_macd_bullish": eval_out.is_macd_bullish,
-                "is_golden_cross": eval_out.is_golden_cross,
+                "rsi_14": getattr(eval_out, "rsi_14", None),
+                "atr_14": getattr(eval_out, "atr_14", None),
+                "atr_dist_50": getattr(eval_out, "atr_distance_50", None),
+                "atr_dist_200": getattr(eval_out, "atr_distance_200", None),
+                "macd_line": getattr(eval_out, "macd_line", None),
+                "macd_signal": getattr(eval_out, "macd_signal", None),
+                "macd_histogram": getattr(eval_out, "macd_histogram", None),
+                "is_macd_bullish_cross": is_macd_cross,
+                "is_macd_bullish": bool(getattr(eval_out, "is_macd_bullish", False)),
+                "is_golden_cross": bool(getattr(eval_out, "is_golden_cross", False)),
                 "backtest": eval_out.backtest,
                 "candles": valid_candles,
                 "volume_ratio": vol_ratio,
-                "valid_candles": eval_out.valid_candles_count,
+                "valid_candles": getattr(eval_out, "valid_candles_count", len(valid_candles)),
                 "raw_candles": len(res["candles"]),
             }
         )
@@ -518,7 +547,10 @@ def render_ohlc_chart(
             template="plotly_white",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig, use_container_width=True, key=chart_key)
+        if chart_key and "key" in inspect.signature(st.plotly_chart).parameters:
+            st.plotly_chart(fig, use_container_width=True, key=chart_key)
+        else:
+            st.plotly_chart(fig, use_container_width=True)
     else:
         chart_df = pd.DataFrame(
             {
@@ -725,6 +757,17 @@ def main() -> None:
                 st.dataframe(pd.DataFrame(wl_table_rows), use_container_width=True, hide_index=True)
 
                 st.markdown("##### Visor Interactivo Watchlist — Gráfico en Tiempo Real e Indicadores")
+                if (
+                    "wl_chart_ticker_select" in st.session_state
+                    and st.session_state["wl_chart_ticker_select"] not in st.session_state.watchlist_tickers
+                ):
+                    del st.session_state["wl_chart_ticker_select"]
+                if (
+                    "wl_remove_select" in st.session_state
+                    and st.session_state["wl_remove_select"] not in st.session_state.watchlist_tickers
+                ):
+                    del st.session_state["wl_remove_select"]
+
                 wl_v1, wl_v2 = st.columns([2.2, 1.2])
                 with wl_v1:
                     wl_selected = st.selectbox(
